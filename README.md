@@ -1,56 +1,199 @@
-# ⛽ PetroTwin — Digital Twin & Decision Support System for E10 RON95 Fuel Price Forecasting
+# PetroTwin
 
-> **Applied Data Science Project**  
-> **University of Transport Ho Chi Minh City (UTH)** — Major: Data Science & Artificial Intelligence
+Forecasting Vietnamese Domestic Fuel Prices with Energy Market Data
 
----
+PetroTwin is a Data Science project that aims to forecast Vietnamese domestic fuel prices using international energy market data, foreign exchange rates, historical domestic fuel prices, and relevant domestic price-regulation factors.
 
-## 📌 1. Project Overview
+The project focuses on building a reproducible forecasting pipeline, evaluating model performance against baseline methods, and monitoring predictions against officially published prices.
 
-**PetroTwin** is an advanced Decision Support System (DSS) & Digital Twin platform developed in Vietnam that integrates **Data Science, Explainable AI (XAI), and MLOps** to forecast **E10 RON95 Bio-fuel** price adjustments by the Ministry of Industry and Trade – Ministry of Finance.
+> Project status: In Progress
 
-Anticipating Vietnam's national roadmap towards green energy transition and the complete replacement of traditional mineral RON95 petrol, PetroTwin goes beyond standard time-series forecasting by providing:
-1. **Econometric & Macroeconomic Foundations:** Integrating USD/VND exchange rates, Brent crude oil prices, Singapore Mogas95 petroleum benchmark prices, and Ethanol E100/agricultural commodity inputs.
-2. **Explainable AI (XAI):** Utilizing **SHAP (SHapley Additive exPlanations)** values to dismantle the "AI black box," providing clear breakdown attribution for price shifts (e.g., impact from international oil markets, exchange rate fluctuations, or Price Stabilization Fund interventions).
-3. **What-If Scenario Simulation:** Enabling decision-makers to simulate market shocks (e.g., sudden global oil price surges or policy adjustments in fund allocations).
-4. **Automated MLOps Pipeline & Error Tracking:** Automatically logging all forecasts into a MySQL database, performing live backtesting against newly published official prices, and dynamically updating MAE/RMSE trends over time.
+## 1. Problem Statement
 
----
+Vietnamese domestic fuel prices are influenced by multiple factors, including international crude oil prices, exchange rates, domestic pricing mechanisms, and government policy adjustments.
 
-## 🏗️ 2. System Architecture
+PetroTwin investigates whether these factors can improve the accuracy of domestic fuel price forecasts and how forecasting performance changes across different adjustment periods.
 
-PetroTwin follows an industry-standard 4-tier architectural design:
+The project also addresses the challenge of limited historical data for E10 gasoline by carefully evaluating data availability and distinguishing E10 observations from other fuel types.
+
+## 2. Project Objectives
+
+- Collect and standardize international and domestic fuel price data.
+- Analyze relationships between crude oil prices, exchange rates, and domestic fuel prices.
+- Develop time-series and machine learning forecasting models.
+- Compare forecasting models against a naive baseline.
+- Evaluate models using time-aware validation and metrics such as MAE and RMSE.
+- Explain model predictions and investigate alternative market scenarios.
+- Build a dashboard to visualize historical prices, forecasts, actual prices, and prediction errors.
+- Track predictions over time to assess real-world forecasting performance.
+
+## 3. Data Sources
+
+The initial dataset includes:
+
+| Dataset | Description |
+|---|---|
+| Brent crude oil prices | International crude oil price history |
+| USD/VND exchange rates | Historical exchange rates |
+| Vietnamese domestic fuel prices | Historical domestic fuel prices, including available E10 and RON95 observations |
+| Domestic policy and pricing information | Relevant price-regulation events, subject to source availability |
+
+Each dataset will be inspected for its source, time coverage, units, missing values, duplicates, and update frequency.
+
+Data sources and collection methods will be documented as the project develops.
+
+## 4. Methodology
+
+### Data Engineering
+- Data quality assessment
+- Data cleaning and standardization
+- Temporal alignment
+- Data validation and database ingestion
+
+### Exploratory Data Analysis
+- Price trend analysis
+- Distribution and outlier analysis
+- Correlation analysis
+- Analysis of price changes across adjustment periods
+
+### Forecasting
+Candidate approaches include:
+- Naive forecasting baseline
+- SARIMAX
+- XGBoost
+
+Additional models will be considered only when justified by data availability and evaluation results.
+
+### Model Evaluation
+- Walk-forward or time-aware validation
+- Mean Absolute Error (MAE)
+- Root Mean Squared Error (RMSE)
+- Comparison against the baseline
+- Error analysis across forecasting periods
+
+### Explainability and Scenario Analysis
+- SHAP-based feature contribution analysis where applicable
+- Conditional scenario simulations for changes in Brent prices and exchange rates
+- Evaluation of whether additional features improve out-of-sample performance
+
+### Forecast Monitoring
+- Save forecasts with timestamps and model versions
+- Match predictions with the corresponding actual price adjustment
+- Track prediction errors after official prices become available
+
+## 5. System Architecture
+
+The planned workflow is:
+
+Raw Data → Data Cleaning → Data Validation → Database → Feature Engineering → Forecasting Models → Evaluation → API → Dashboard
+
+The system is designed to separate data ingestion, model development, evaluation, and presentation so that individual components can be developed and tested independently.
+
+## 6. Technology Stack
+
+Planned technologies:
+
+- Language: Python
+- Data processing: Pandas, NumPy
+- Machine learning: scikit-learn, XGBoost, statsmodels
+- Explainability: SHAP
+- Database: MySQL
+- Backend API: FastAPI
+- Visualization: React or Streamlit, subject to implementation decisions
+- Version control: Git and GitHub
+
+The final stack will reflect the technologies actually adopted by the team.
+
+## 7. Team Contributions
+
+The project is developed by a five-member team.
+
+| Member | Primary Responsibilities |
+|---|---|
+| M1 — Project Leader | Data collection, data cleaning, pipeline development, integration, and quality control |
+| M2 — Data Analysis & Database | Exploratory data analysis, database design, data ingestion, and automation |
+| M3 — Time Series & Feature Engineering | Forecast target definition, feature engineering, baseline forecasting, and validation design |
+| M4 — Machine Learning & Explainability | Model experiments, model comparison, SHAP analysis, and scenario simulations |
+| M5 — Forecast Evaluation & Application | Independent evaluation, prediction-error monitoring, API development, and dashboard implementation |
+
+All members contribute to the Data Science workflow through analysis, experiments, validation, or interpretation of results.
+
+## 8. Project Structure
 
 ```text
-┌────────────────────────────────────────────────────────────────────────┐
-│                        1. DATA PIPELINE LAYER                          │
-│  [Global Financial Data]     [Domestic Market Data]  [News Data]       │
-│  • Brent Oil (Yahoo Finance) • PVOIL / E100 Prices   • News RSS Feed   │
-│  • USD/VND Exchange Rates    • Stabilization Fund    • Energy Journals │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │ Automated ETL / Ingestion Pipeline
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                      2. FEATURE ENGINEERING LAYER                      │
-│  • Time-Series Lags (Lag 1, 3, 7) & Rolling Windows (MA7, MA14)         │
-│  • Formula E10 Blending (90% Mogas95 + 10% E100)                       │
-│  • Market Sentiment Score (PhoBERT NLP)                                │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │ Formatted Feature Matrix
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                         3. MODELING & XAI LAYER                        │
-│  • Model 1: ARIMAX / VAR (Econometrics Baseline)                       │
-│  • Model 2: XGBoost / LightGBM / CatBoost (Tabular ML)                 │
-│  • Model 3: LSTM / Temporal Fusion Transformer (Deep Learning)         │
-│  • Model 4: PhoBERT Sentiment + SHAP Values & Scenario Engine          │
-│  • Model 5: Ensemble / Stacking Meta-Learner Model                     │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │ Model Artifacts & Forecast APIs
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│               4. PRESENTATION & MLOPS LOGGING LAYER                    │
-│  • FastAPI Backend Endpoints                                           │
-│  • Streamlit Web Dashboard (Line Chart, MAE/RMSE Trend, SHAP Plot)    │
-│  • MySQL Logging Database (Auto Error Calculation upon Actual Price)  │
-└───────────────────────────────────┬────────────────────────────────────┘
+PetroTwin/
+├── data/
+│   ├── raw/
+│   ├── processed/
+│   └── README.md
+├── notebooks/
+│   ├── eda/
+│   ├── feature_engineering/
+│   └── experiments/
+├── src/
+│   ├── data/
+│   ├── features/
+│   ├── models/
+│   ├── evaluation/
+│   └── pipeline/
+├── backend/
+├── frontend/
+├── tests/
+├── docs/
+├── requirements.txt
+├── .gitignore
+└── README.md
+```
+
+The directory structure may evolve as the implementation progresses. Raw data, processed data, experiments, and application code should remain clearly separated.
+
+## 9. Reproducibility and Data Leakage Prevention
+
+- Preserve original raw data and document cleaning rules.
+- Record data cut-off timestamps for forecasts.
+- Use only information available at the time each forecast is generated.
+- Evaluate models using chronological splits rather than random shuffling.
+- Compare models on consistent evaluation periods.
+- Store model versions and forecast timestamps.
+- Exclude forecasts without corresponding actual prices from error metrics.
+- Distinguish observed historical data from assumptions used in scenario simulations.
+
+## 10. Limitations
+
+- E10 historical observations may be limited compared with other fuel types.
+- International prices and exchange rates may not align directly with domestic price adjustment dates.
+- Domestic pricing regulations and stabilization mechanisms may affect the relationship between market variables and retail prices.
+- Historical relationships do not guarantee future forecasting accuracy.
+- SHAP explains model behavior, not causal effects.
+- Scenario simulations are conditional estimates, not proof of the impact of a policy decision.
+
+## 11. Getting Started
+
+Setup instructions will be added after the repository structure and dependencies are finalized.
+
+The initial setup will cover:
+1. Cloning the repository.
+2. Creating a Python virtual environment.
+3. Installing dependencies.
+4. Configuring database credentials using environment variables.
+5. Preparing the datasets.
+6. Running the data pipeline and evaluation scripts.
+7. Starting the backend and dashboard.
+
+## 12. Project Roadmap
+
+- [ ] Audit and document data sources.
+- [ ] Build reproducible data-cleaning pipelines.
+- [ ] Complete exploratory data analysis.
+- [ ] Design the database and ingestion process.
+- [ ] Build the baseline forecasting model.
+- [ ] Implement time-aware model evaluation.
+- [ ] Compare candidate forecasting models.
+- [ ] Add explainability and scenario analysis.
+- [ ] Develop the API and dashboard.
+- [ ] Track forecasts against actual domestic prices.
+- [ ] Complete integration testing and documentation.
+
+## Disclaimer
+
+PetroTwin is an educational and research project. Forecasts are estimates based on available data and modeling assumptions. They should not be interpreted as official fuel prices or guaranteed predictions.
