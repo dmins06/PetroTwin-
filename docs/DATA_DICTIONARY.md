@@ -35,7 +35,7 @@ One row per fuel product and effective instant. A price adjustment is an event; 
 | `product_id` | string | Controlled ID mapped from source label; unknown labels are quarantined. |
 | `source_product_name` | string | Exact original product label. |
 | `source_record_date` | DATE | Original `date` column, retained without assigning announcement semantics that the source has not verified. |
-| `effective_at_local` | TIMESTAMP WITHOUT TIME ZONE | Effective instant in `Asia/Ho_Chi_Minh`; derive only from the source effective date/time using the rule below. |
+| `effective_at_local` | TIMESTAMP WITH TIME ZONE | Effective instant in `Asia/Ho_Chi_Minh`; serialized with the `+07:00` offset. Derive only from the source effective date/time using the rule below. |
 | `effective_time_24_00_normalized` | boolean | True when source `24:00` was rolled to next-day `00:00`; source date/time remain in raw snapshot. |
 | `price_value` | DECIMAL | Domestic price; must be positive for a publishable price observation. |
 | `unit_code` | enum | `VND/liter` for the current products. Never combine with market units. |
@@ -52,6 +52,30 @@ Primary key in ingestion history: (`product_id`, `effective_at_local`, `source_i
 ### `fuel_market_panel`
 
 One row per validated fuel-price event, created by joining the two canonical market series as features. It carries the target event fields plus Brent and FX values, their source observation dates, and their age in calendar days. Keep separate feature columns and units; never sum or compare the two market values directly.
+
+| Column | Type | Rule |
+|---|---|---|
+| `product_id` | string | Controlled fuel product ID. |
+| `source_product_name` | string | Original fuel label. |
+| `source_record_date` | DATE | Original source `date`; no announcement meaning is implied. |
+| `effective_at_local` | TIMESTAMP WITH TIME ZONE | Fuel event time, `Asia/Ho_Chi_Minh`, serialized with `+07:00`. |
+| `price_value` | DECIMAL | Target price, `VND/liter`; positive and non-NULL. |
+| `price_change_value` | DECIMAL, nullable | Reported signed change; blank if source did not provide it. |
+| `unit_code` | enum | Always `VND/liter` for current fuel targets. |
+| `target_source_id`, `target_snapshot_id` | string | Identifies the source event and raw snapshot. |
+| `brent_source_id`, `brent_snapshot_id` | string | Provenance for the selected Brent feature; blank when no prior observation exists. |
+| `brent_observation_date` | DATE, nullable | Selected Brent source date, strictly before event date. |
+| `brent_usd_per_barrel` | DECIMAL, nullable | Selected Brent value, `USD/bbl`. |
+| `brent_age_days` | integer, nullable | Calendar days from selected Brent date to fuel event date; at least 1. |
+| `brent_usd_per_barrel_unit` | enum | Always `USD/bbl`. |
+| `fx_source_id`, `fx_snapshot_id` | string | Provenance for the selected FX feature; blank when no prior observation exists. |
+| `fx_observation_date` | DATE, nullable | Selected FX source date, strictly before event date. |
+| `usd_vnd_rate` | DECIMAL, nullable | Selected FX value, `VND/USD`. |
+| `fx_age_days` | integer, nullable | Calendar days from selected FX date to fuel event date; at least 1. |
+| `usd_vnd_rate_unit` | enum | Always `VND/USD`. |
+| `schema_version` | string | `petrotwin-data-v1`. |
+
+Panel key: (`product_id`, `effective_at_local`, `target_snapshot_id`). Use this table for event-level model input; use the two canonical source tables for source-specific analysis.
 
 Join rule: for a fuel event on local date `D`, select the latest `observation_date < D` with `observation_status='observed'` for each market series. This strict prior-day rule avoids look-ahead when publication times are unknown. Missing prior market history remains NULL and is counted in the quality report. The joined observation date, source/snapshot IDs, and age are mandatory audit columns. This is a point-in-time join in the derived panel; it does not write imputed values back to either canonical source table.
 
@@ -94,7 +118,7 @@ Store one manifest row per ingested file: `snapshot_id`, source ID, source URL, 
 
 Run these checks before publishing processed data:
 
-1. Required columns exist; no unexpected type coercion; source schema fingerprint is recorded. A new/removed/renamed source column raises a schema-change warning and requires an explicit parser decision; missing required columns fail the batch.
+1. Required columns exist; no unexpected type coercion; source schema fingerprint is recorded. Source headers must match the pinned v1 schema, including names and order. Any added, removed, renamed, or reordered header fails the batch until the parser and schema version are explicitly updated.
 2. Dates, timestamps, numbers, booleans, and status enums parse under the source-specific parser. Report invalid and null counts by column.
 3. Keys are complete and unique after exact duplicate handling. Conflicting duplicates fail the batch.
 4. Units match the series/product mapping. Market values must be positive when observed; domestic publishable prices must be positive. Keep signed `price_change_value` unconstrained except for numeric parsing.

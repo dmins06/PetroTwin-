@@ -380,6 +380,10 @@ def _parse_fuel(
         product_effective_dates.setdefault(product_id, set()).add(
             datetime.fromisoformat(effective_at).date()
         )
+        if raw["price_vnd_per_liter"].strip() == "":
+            raise PipelineError(
+                f"{path.name} row {row_number}: missing domestic target price"
+            )
 
         try:
             price = _decimal(raw["price_vnd_per_liter"], "price_vnd_per_liter", path.name, row_number)
@@ -402,15 +406,6 @@ def _parse_fuel(
             raise PipelineError(
                 f"{path.name} row {row_number}: invalid tax boolean {tax_raw!r}"
             )
-        if price is None:
-            product_quarantine_counts[product_id] += 1
-            quarantine.append({
-                "source_file": path.name,
-                "source_row_number": row_number,
-                "reason_code": "missing_domestic_target_price",
-                "raw_row_json": json.dumps(raw, ensure_ascii=False, sort_keys=True),
-            })
-            continue
         if price == 0:
             zero_prices += 1
             product_quarantine_counts[product_id] += 1
