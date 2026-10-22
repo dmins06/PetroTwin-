@@ -1,0 +1,32 @@
+# Local environments and secrets
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Notebook and tooling state
+.ipynb_checkpoints/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Data, generated forecasts, logs, and model artifacts
+data/raw/**
+!data/raw/README.md
+data/interim/**
+!data/interim/README.md
+data/processed/**
+!data/processed/README.md
+artifacts/**
+logs/**
+*.joblib
+*.pkl
+*.parquet
+*.csv
+
+# Generated report assets
+reports/figures/generated/**
