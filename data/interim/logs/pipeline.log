@@ -1,0 +1,8 @@
+2026-10-22T02:51:44Z INFO run_id=b0a8d1bfff26d961ce3f start schema=petrotwin-data-v1
+2026-10-22T02:51:45Z INFO run_id=b0a8d1bfff26d961ce3f published market_rows=4521 fuel_rows=1386 quarantined=64
+2026-10-22T02:53:43Z INFO run_id=6811bce6c0c8330a2b89 start schema=petrotwin-data-v1
+2026-10-22T02:53:43Z INFO run_id=6811bce6c0c8330a2b89 published market_rows=4521 fuel_rows=1386 quarantined=64
+2026-10-22T02:54:01Z INFO run_id=6811bce6c0c8330a2b89 start schema=petrotwin-data-v1
+2026-10-22T02:54:02Z INFO run_id=6811bce6c0c8330a2b89 published market_rows=4521 fuel_rows=1386 quarantined=64
+2026-10-22T03:02:05Z INFO run_id=1849dea18e4bf43ee561 start schema=petrotwin-data-v1
+2026-10-22T03:02:06Z INFO run_id=1849dea18e4bf43ee561 published market_rows=4521 fuel_rows=1386 quarantined=64
