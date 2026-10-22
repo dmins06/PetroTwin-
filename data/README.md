@@ -9,3 +9,4 @@
 - Treat each fuel grade as a distinct series. Do not infer E10 history from RON95 or other grades.
 - Cleaning must be deterministic and documented. Validation should check required columns, parseable dates, duplicate keys, units, missing targets, and chronological order before saving processed data.
 - Split time series chronologically. Fit imputers, scalers, and feature transforms on each training window only.
+- Build the current canonical snapshot from the repository root with `PYTHONPATH=src python -m petrotwin.data.pipeline`. Outputs are versioned under `processed/runs/<run_id>/`; `processed/current.json` points to the last successfully validated snapshot. See `src/petrotwin/pipeline/README.md` for pipeline behavior and options.

@@ -1,3 +1,19 @@
-# Pipeline orchestration
+# Data pipeline
 
-Coordinate data loading, cleaning, validation, feature generation, fitting, evaluation, and forecast logging here. Runs should be reproducible from tracked configuration and input versions, and should fail early when required data checks fail.
+Run from the repository root after placing the three source snapshots in `data/raw/`:
+
+```bash
+PYTHONPATH=src python -m petrotwin.data.pipeline
+```
+
+Optional arguments: `--raw-dir`, `--processed-dir`, `--log-dir`, and `--config`. The default runner reads `configs/default.yaml` and requires:
+
+- `brent_crude_prices.csv`
+- `usd_vnd_rates.csv`
+- `data_price_petro.csv`
+
+Each source is parsed with a strict, versioned schema. The pipeline hashes each raw file, config, schema version, pipeline version, and pipeline code to create an idempotent run ID. It writes the canonical market and fuel tables, an event-aligned `fuel_market_panel.csv`, a manifest, a quality report, and `quarantine.csv` under `data/processed/runs/<run_id>/`. The panel joins market observations strictly before each local fuel effective date and records each feature's observation date and age. `data/processed/current.json` is atomically replaced only after validation succeeds. Earlier runs remain available for reproducibility. Append-only execution logs are stored under `data/interim/logs/pipeline.log`; batch-level failures leave the current pointer unchanged.
+
+Exact repeated rows are collapsed and counted. Conflicting keys and schema changes fail the batch. Invalid individual values are recorded with a reason and original row in quarantine. The present source snapshot has 64 zero-price FO rows; those are quarantined. Brent's 62 explicitly missing observations remain in the canonical market table with a NULL value and `missing` status. No interpolation or forward-fill is performed.
+
+The runner uses the source snapshots already collected; it does not fetch new data from the internet. Source acquisition, licenses, and the semantics of zero-price FO rows still require confirmation with publishers. See [the canonical schema and cleaning contract](../../../docs/DATA_DICTIONARY.md) before changing parsers or mappings.
