@@ -99,7 +99,7 @@ Planned technologies:
 - Explainability: SHAP
 - Database: MySQL
 - Backend API: FastAPI
-- Visualization: React or Streamlit, subject to implementation decisions
+- Visualization: Streamlit
 - Version control: Git and GitHub
 
 The final stack will reflect the technologies actually adopted by the team.
@@ -122,30 +122,35 @@ All members contribute to the Data Science workflow through analysis, experiment
 
 ```text
 PetroTwin/
+├── configs/                 # Versioned, non-secret project settings
 ├── data/
-│   ├── raw/
-│   ├── processed/
-│   └── README.md
+│   ├── raw/                 # Original source files; never edit in place
+│   ├── interim/             # Intermediate outputs; rebuildable
+│   ├── processed/           # Validated, analysis-ready datasets
+│   └── README.md            # Naming, schema, and provenance conventions
 ├── notebooks/
-│   ├── eda/
-│   ├── feature_engineering/
-│   └── experiments/
-├── src/
-│   ├── data/
-│   ├── features/
-│   ├── models/
-│   ├── evaluation/
-│   └── pipeline/
-├── backend/
-├── frontend/
-├── tests/
-├── docs/
-├── requirements.txt
-├── .gitignore
+│   ├── 01_eda/
+│   ├── 02_feature_engineering/
+│   └── 03_model_experiments/
+├── src/petrotwin/
+│   ├── data/                # Cleaning and validation
+│   ├── features/            # Point-in-time-safe feature creation
+│   ├── models/              # Baseline, SARIMAX, and XGBoost
+│   ├── evaluation/          # Walk-forward evaluation and metrics
+│   ├── monitoring/          # Forecast records and error tracking
+│   └── pipeline/            # Reproducible workflow orchestration
+├── backend/app/             # FastAPI service
+├── dashboard/               # Streamlit application
+├── tests/unit/              # Small isolated tests
+├── tests/integration/       # Pipeline and API integration tests
+├── reports/                 # Report outline and generated outputs
+├── docs/                    # Data, modeling, API, and team guidance
+├── .env.example             # Safe configuration template
+├── pyproject.toml           # Package metadata and dependency groups
 └── README.md
 ```
 
-The directory structure may evolve as the implementation progresses. Raw data, processed data, experiments, and application code should remain clearly separated.
+See [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md) for module ownership and workflow details. Raw and generated datasets, model artifacts, logs, and local secrets are excluded from Git.
 
 ## 9. Reproducibility and Data Leakage Prevention
 
@@ -169,16 +174,28 @@ The directory structure may evolve as the implementation progresses. Raw data, p
 
 ## 11. Getting Started
 
-Setup instructions will be added after the repository structure and dependencies are finalized.
+Requirements: Python 3.11 or newer and Git.
 
-The initial setup will cover:
-1. Cloning the repository.
-2. Creating a Python virtual environment.
-3. Installing dependencies.
-4. Configuring database credentials using environment variables.
-5. Preparing the datasets.
-6. Running the data pipeline and evaluation scripts.
-7. Starting the backend and dashboard.
+```bash
+git clone https://github.com/dmins06/PetroTwin-.git
+cd PetroTwin-
+python -m venv .venv
+```
+
+Activate the environment, then install the project and all planned application/model dependencies:
+
+```bash
+# macOS/Linux
+source .venv/bin/activate
+
+# Windows PowerShell
+# .venv\Scripts\Activate.ps1
+
+python -m pip install --upgrade pip
+python -m pip install -e ".[models,api,dashboard,dev]"
+```
+
+Copy `.env.example` to `.env` and fill in only the local values you need. Never commit `.env` or real credentials. Dataset preparation and app entry points will be added with their respective implementations; until then, use the README files in each area for the intended conventions.
 
 ## 12. Project Roadmap
 

@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "petrotwin"
+version = "0.1.0"
+description = "Vietnamese domestic fuel price forecasting research project"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "pydantic-settings>=2.2",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+models = [
+    "scikit-learn>=1.4",
+    "statsmodels>=0.14",
+    "xgboost>=2.0",
+]
+api = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+]
+dashboard = ["streamlit>=1.32"]
+dev = [
+    "httpx>=0.27",
+    "pytest>=8.0",
+    "ruff>=0.3",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

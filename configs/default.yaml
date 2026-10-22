@@ -1,0 +1,21 @@
+project:
+  timezone: Asia/Ho_Chi_Minh
+  target_column: price_vnd_per_liter
+  date_column: effective_date
+
+data:
+  raw_dir: data/raw
+  interim_dir: data/interim
+  processed_dir: data/processed
+  duplicate_policy: fail
+  missing_target_policy: fail
+
+evaluation:
+  strategy: expanding_window
+  forecast_horizon: 1
+  metrics:
+    - mae
+    - rmse
+
+forecast_logging:
+  path: artifacts/forecast_log.csv
