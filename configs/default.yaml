@@ -1,14 +1,33 @@
 project:
   timezone: Asia/Ho_Chi_Minh
-  target_column: price_vnd_per_liter
-  date_column: effective_date
+  target_column: price_value
+  target_key: product_id
+  date_column: effective_at_local
 
 data:
+  schema_version: petrotwin-data-v1
   raw_dir: data/raw
   interim_dir: data/interim
   processed_dir: data/processed
-  duplicate_policy: fail
+  duplicate_policy: collapse_exact_fail_conflict
   missing_target_policy: fail
+  missing_optional_policy: preserve_null
+  invalid_row_policy: quarantine
+  batch_publish_policy: atomic
+  timestamps:
+    source_dates: calendar_date
+    extraction_timezone: UTC
+    domestic_effective_timezone: Asia/Ho_Chi_Minh
+    allow_end_of_day_24_00: true
+    end_of_day_normalization: next_day_midnight
+  units:
+    brent_dated_usd_bbl: USD/bbl
+    usd_vnd_sbv_reference: VND/USD
+    domestic_fuel_price: VND/liter
+  market_missing_policy: allow_null_only_when_status_missing
+  domestic_zero_price_policy: quarantine
+  market_frequency_policy: audit_only
+  domestic_frequency_policy: event_based_audit_only
 
 evaluation:
   strategy: expanding_window
