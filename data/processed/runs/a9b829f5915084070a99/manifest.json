@@ -1,0 +1,62 @@
+{
+  "outputs": {
+    "fuel_market_panel.csv": {
+      "rows": 1386,
+      "sha256": "702f8da8ab3bef2ec7f5b9421c0c2a89e80305822a7f9e05760930457f30cf12"
+    },
+    "fuel_price_observation.csv": {
+      "rows": 1386,
+      "sha256": "10a5d60af3b842da412c9cd3b75b1bfcdb68e86c47e96a4ecbcd3e55e781be5a"
+    },
+    "market_observation.csv": {
+      "rows": 4521,
+      "sha256": "de81beb9a8b79e8c707bfdc40d352cc39674d400e5656249c4e83312fb6a9076"
+    },
+    "quarantine.csv": {
+      "rows": 64,
+      "sha256": "400c991d6a34bdca6838dd72d1fe7722fba40b2e28b5caa3c191cf7cf8c6998c"
+    }
+  },
+  "pipeline_sha256": "3c0953c12d63a04ea2757823225ba0dc957c62696d7e2f86f4d56958030f6de4",
+  "pipeline_version": "1.0.0",
+  "run_id": "a9b829f5915084070a99",
+  "schema_version": "petrotwin-data-v1",
+  "sources": [
+    {
+      "license_reuse_terms": "unknown; verify with publisher",
+      "publisher_or_attribution": "EIA, distributed by FRED",
+      "raw_filename": "brent_crude_prices.csv",
+      "retrieved_at_utc": "2026-10-21T03:30:48Z",
+      "row_count": 2126,
+      "schema_fingerprint_sha256": "a877ec7fd26b406d2348bb3d4072551b4eb8a72d43dbd39fcf866f6d977c94af",
+      "sha256": "978dd86442f1bdf6c8d8e3ea3da480a2d812b85a1cc02452d69c62cfa5b3ed30",
+      "snapshot_id": "978dd86442f1bdf6c8d8e3ea3da480a2d812b85a1cc02452d69c62cfa5b3ed30",
+      "source_id": "eia_fred",
+      "source_url": "https://fred.stlouisfed.org/data/DCOILBRENTEU"
+    },
+    {
+      "license_reuse_terms": "unknown; verify with publisher",
+      "publisher_or_attribution": "Algolab attributes values to GSO / SBV",
+      "raw_filename": "usd_vnd_rates.csv",
+      "retrieved_at_utc": "2026-10-21T03:35:19Z",
+      "row_count": 2395,
+      "schema_fingerprint_sha256": "c008654d0084f363a803e32e91732a6fedd1e2e459c3327e4d5dee869707cc13",
+      "sha256": "cbd671a7e8f4128f4c323e9b12af79006918a2514840c062a9bd66b42a0e8ad6",
+      "snapshot_id": "cbd671a7e8f4128f4c323e9b12af79006918a2514840c062a9bd66b42a0e8ad6",
+      "source_id": "sbv_reference_via_algolab",
+      "source_url": "https://algolab.vn/macro/vn-fx-rate-ty-gia-sbv-trung-tam"
+    },
+    {
+      "license_reuse_terms": "unknown; verify with publisher",
+      "publisher_or_attribution": "PVOIL",
+      "raw_filename": "data_price_petro.csv",
+      "retrieved_at_utc": "2026-10-19T07:23:45Z",
+      "row_count": 1450,
+      "schema_fingerprint_sha256": "6e76862985400abc3be847831ba924a8b52bdfdde6825bf278c1bb7ff0f684f4",
+      "sha256": "8c2bc06343687a922196f23923beee59ffe2f07b8f6f1b8f1fabf1bfd34c9379",
+      "snapshot_id": "8c2bc06343687a922196f23923beee59ffe2f07b8f6f1b8f1fabf1bfd34c9379",
+      "source_id": "pvoil",
+      "source_url": "https://pvoil.com.vn/tin-gia-xang-dau"
+    }
+  ]
+}

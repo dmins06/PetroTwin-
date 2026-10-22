@@ -180,9 +180,19 @@ def _read_csv(path: Path, expected_headers: list[str]) -> tuple[list[dict[str, s
     return rows, fingerprint
 
 
-def _write_csv(path: Path, rows: list[dict[str, Any]], columns: list[str]) -> None:
+def _write_csv(
+    path: Path,
+    rows: list[dict[str, Any]],
+    columns: list[str],
+    lineterminator: str = "\n",
+) -> None:
     with path.open("w", encoding="utf-8", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=columns, extrasaction="ignore")
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=columns,
+            extrasaction="ignore",
+            lineterminator=lineterminator,
+        )
         writer.writeheader()
         for row in rows:
             writer.writerow({key: row.get(key, "") for key in columns})
@@ -347,7 +357,8 @@ def _parse_fuel(
     exact_duplicates = 0
     missing_changes = 0
     zero_prices = 0
-    normalized_24 = 0
+    normalized_24_source_rows = 0
+    normalized_24_canonical_rows = 0
     price_change_missing_by_product: Counter[str] = Counter()
     product_input_counts: Counter[str] = Counter()
     product_quarantine_counts: Counter[str] = Counter()
@@ -364,7 +375,7 @@ def _parse_fuel(
         effective_at, normalized = _parse_effective_at(
             raw["effective_date"], raw["effective_time"], path.name, row_number
         )
-        normalized_24 += int(normalized)
+        normalized_24_source_rows += int(normalized)
         product_name = raw["product_name"]
         product_id = PRODUCT_IDS.get(product_name)
         if not product_id:
@@ -442,6 +453,7 @@ def _parse_fuel(
             "retrieved_at_utc": retrieved_at,
             "schema_version": SCHEMA_VERSION,
         })
+        normalized_24_canonical_rows += int(normalized)
 
     key = ("product_id", "effective_at_local", "source_id", "snapshot_id")
     output, duplicate_keys = _dedupe_or_fail(output, key, path.name)
@@ -475,7 +487,8 @@ def _parse_fuel(
         "quarantined_rows": len(quarantine),
         "zero_prices_quarantined": zero_prices,
         "missing_price_change_values": missing_changes,
-        "effective_24_00_normalized": normalized_24,
+        "effective_24_00_source_rows": normalized_24_source_rows,
+        "effective_24_00_normalized": normalized_24_canonical_rows,
         "products": per_product,
         "schema_fingerprint_sha256": schema_fingerprint,
     }
@@ -506,6 +519,7 @@ def _save_quarantine(path: Path, rows: list[dict[str, Any]]) -> None:
         writer = csv.DictWriter(
             stream,
             fieldnames=["source_file", "source_row_number", "reason_code", "raw_row_json"],
+            lineterminator="\n",
         )
         writer.writeheader()
         writer.writerows(rows)
@@ -684,42 +698,64 @@ def run_pipeline(
         runs_dir = processed_dir / "runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
         run_dir = runs_dir / run_id
-        if not run_dir.exists():
-            staging_dir = Path(tempfile.mkdtemp(prefix=f".{run_id}.", dir=runs_dir))
-            try:
-                _write_csv(staging_dir / "market_observation.csv", market_rows, [
-                    "series_id", "observation_date", "value", "unit_code", "observation_status",
-                    "source_id", "snapshot_id", "source_value", "source_url", "retrieved_at_utc",
-                    "schema_version",
-                ])
-                _write_csv(staging_dir / "fuel_price_observation.csv", fuel, [
-                    "product_id", "source_product_name", "source_record_date", "effective_at_local",
-                    "effective_time_24_00_normalized", "price_value", "unit_code",
-                    "price_change_value", "tax_included", "source_id", "snapshot_id", "source_url",
-                    "retrieved_at_utc", "schema_version",
-                ])
-                _write_csv(staging_dir / "fuel_market_panel.csv", panel_rows, [
-                    "product_id", "source_product_name", "source_record_date", "effective_at_local",
-                    "price_value", "price_change_value", "unit_code", "target_source_id",
-                    "target_snapshot_id", "brent_source_id", "brent_snapshot_id",
-                    "brent_observation_date", "brent_usd_per_barrel", "brent_age_days",
-                    "brent_usd_per_barrel_unit", "fx_source_id", "fx_snapshot_id",
-                    "fx_observation_date", "usd_vnd_rate", "fx_age_days", "usd_vnd_rate_unit",
-                    "schema_version",
-                ])
-                _save_quarantine(staging_dir / "quarantine.csv", all_quarantine)
-                _json_write(staging_dir / "quality_report.json", quality)
-                _json_write(staging_dir / "manifest.json", {
-                    "run_id": run_id,
-                    "schema_version": SCHEMA_VERSION,
-                    "pipeline_version": PIPELINE_VERSION,
-                    "pipeline_sha256": pipeline_hash,
-                    "sources": manifests,
-                })
+        staging_dir = Path(tempfile.mkdtemp(prefix=f".{run_id}.", dir=runs_dir))
+        try:
+            _write_csv(staging_dir / "market_observation.csv", market_rows, [
+                "series_id", "observation_date", "value", "unit_code", "observation_status",
+                "source_id", "snapshot_id", "source_value", "source_url", "retrieved_at_utc",
+                "schema_version",
+            ])
+            _write_csv(staging_dir / "fuel_price_observation.csv", fuel, [
+                "product_id", "source_product_name", "source_record_date", "effective_at_local",
+                "effective_time_24_00_normalized", "price_value", "unit_code",
+                "price_change_value", "tax_included", "source_id", "snapshot_id", "source_url",
+                "retrieved_at_utc", "schema_version",
+            ])
+            _write_csv(staging_dir / "fuel_market_panel.csv", panel_rows, [
+                "product_id", "source_product_name", "source_record_date", "effective_at_local",
+                "price_value", "price_change_value", "unit_code", "target_source_id",
+                "target_snapshot_id", "brent_source_id", "brent_snapshot_id",
+                "brent_observation_date", "brent_usd_per_barrel", "brent_age_days",
+                "brent_usd_per_barrel_unit", "fx_source_id", "fx_snapshot_id",
+                "fx_observation_date", "usd_vnd_rate", "fx_age_days", "usd_vnd_rate_unit",
+                "schema_version",
+            ], lineterminator="\n")
+            _save_quarantine(staging_dir / "quarantine.csv", all_quarantine)
+
+            csv_outputs = [
+                ("market_observation.csv", len(market_rows)),
+                ("fuel_price_observation.csv", len(fuel)),
+                ("fuel_market_panel.csv", len(panel_rows)),
+                ("quarantine.csv", len(all_quarantine)),
+            ]
+            output_manifest = {
+                filename: {"rows": row_count, "sha256": _sha256(staging_dir / filename)}
+                for filename, row_count in csv_outputs
+            }
+            quality["outputs"] = output_manifest
+            _json_write(staging_dir / "quality_report.json", quality)
+            _json_write(staging_dir / "manifest.json", {
+                "run_id": run_id,
+                "schema_version": SCHEMA_VERSION,
+                "pipeline_version": PIPELINE_VERSION,
+                "pipeline_sha256": pipeline_hash,
+                "sources": manifests,
+                "outputs": output_manifest,
+            })
+
+            if run_dir.exists():
+                for filename, expected in output_manifest.items():
+                    existing = run_dir / filename
+                    if not existing.is_file() or _sha256(existing) != expected["sha256"]:
+                        raise PipelineError(
+                            f"existing run {run_id} is not reproducible: output mismatch in {filename}"
+                        )
+                shutil.rmtree(staging_dir)
+            else:
                 os.replace(staging_dir, run_dir)
-            except Exception:
-                shutil.rmtree(staging_dir, ignore_errors=True)
-                raise
+        except Exception:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
 
         _atomic_json(processed_dir / "current.json", {
             "run_id": run_id,

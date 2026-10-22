@@ -1,0 +1,370 @@
+{
+  "completed_at_utc": "2026-10-22T03:54:02.108583Z",
+  "integrated": {
+    "exact_duplicate_keys_collapsed": 0,
+    "fuel_events_without_prior_market_observation": {
+      "brent_dated_usd_bbl": 6,
+      "usd_vnd_sbv_reference": 6
+    },
+    "fuel_market_panel_rows": 1386,
+    "fuel_price_observation_rows": 1386,
+    "market_coverage_by_series": {
+      "brent_dated_usd_bbl": {
+        "first": "2018-08-22",
+        "last": "2026-10-14",
+        "rows": 2126
+      },
+      "usd_vnd_sbv_reference": {
+        "first": "2018-08-22",
+        "last": "2026-10-16",
+        "rows": 2395
+      }
+    },
+    "market_observation_rows": 4521,
+    "quarantine_reason_counts": {
+      "domestic_zero_price_pending_source_confirmation": 64
+    },
+    "quarantined_rows": 64
+  },
+  "outputs": {
+    "fuel_market_panel.csv": {
+      "rows": 1386,
+      "sha256": "702f8da8ab3bef2ec7f5b9421c0c2a89e80305822a7f9e05760930457f30cf12"
+    },
+    "fuel_price_observation.csv": {
+      "rows": 1386,
+      "sha256": "10a5d60af3b842da412c9cd3b75b1bfcdb68e86c47e96a4ecbcd3e55e781be5a"
+    },
+    "market_observation.csv": {
+      "rows": 4521,
+      "sha256": "de81beb9a8b79e8c707bfdc40d352cc39674d400e5656249c4e83312fb6a9076"
+    },
+    "quarantine.csv": {
+      "rows": 64,
+      "sha256": "400c991d6a34bdca6838dd72d1fe7722fba40b2e28b5caa3c191cf7cf8c6998c"
+    }
+  },
+  "pipeline_sha256": "3c0953c12d63a04ea2757823225ba0dc957c62696d7e2f86f4d56958030f6de4",
+  "pipeline_version": "1.0.0",
+  "publication_status": "validated_with_quarantine",
+  "run_id": "a9b829f5915084070a99",
+  "schema_version": "petrotwin-data-v1",
+  "source_checks": {
+    "brent": {
+      "distinct_dates": 2126,
+      "exact_duplicates_collapsed": 0,
+      "first_observation_date": "2018-08-22",
+      "interval_days": {
+        "1": 1700,
+        "3": 425
+      },
+      "last_observation_date": "2026-10-14",
+      "missing_values": 62,
+      "quarantined_rows": 0,
+      "rows_canonical": 2126,
+      "rows_read": 2126,
+      "schema_fingerprint_sha256": "a877ec7fd26b406d2348bb3d4072551b4eb8a72d43dbd39fcf866f6d977c94af",
+      "source_file": "brent_crude_prices.csv"
+    },
+    "fuel_prices": {
+      "effective_24_00_normalized": 131,
+      "effective_24_00_source_rows": 161,
+      "exact_duplicates_collapsed": 0,
+      "missing_price_change_values": 8,
+      "products": {
+        "diesel_0001s_v": {
+          "canonical_first_effective_date": "2024-09-26",
+          "canonical_last_effective_date": "2026-10-16",
+          "canonical_rows": 118,
+          "first_effective_date": "2024-09-26",
+          "interval_days": {
+            "1": 6,
+            "2": 4,
+            "3": 1,
+            "4": 1,
+            "5": 5,
+            "6": 5,
+            "7": 90,
+            "8": 3,
+            "9": 1,
+            "11": 1
+          },
+          "last_effective_date": "2026-10-16",
+          "missing_price_change_values": 0,
+          "quarantined_rows": 0,
+          "source_rows": 118
+        },
+        "diesel_0005s_iv": {
+          "canonical_first_effective_date": "2018-08-22",
+          "canonical_last_effective_date": "2019-01-01",
+          "canonical_rows": 10,
+          "first_effective_date": "2018-08-22",
+          "interval_days": {
+            "11": 1,
+            "15": 7,
+            "16": 1
+          },
+          "last_effective_date": "2019-01-01",
+          "missing_price_change_values": 1,
+          "quarantined_rows": 0,
+          "source_rows": 10
+        },
+        "diesel_005s_ii": {
+          "canonical_first_effective_date": "2018-08-22",
+          "canonical_last_effective_date": "2026-10-16",
+          "canonical_rows": 309,
+          "first_effective_date": "2018-08-22",
+          "interval_days": {
+            "1": 6,
+            "2": 5,
+            "3": 1,
+            "4": 1,
+            "5": 5,
+            "6": 7,
+            "7": 135,
+            "8": 13,
+            "9": 7,
+            "10": 19,
+            "11": 13,
+            "12": 6,
+            "13": 3,
+            "14": 3,
+            "15": 69,
+            "16": 11,
+            "17": 1,
+            "19": 1,
+            "21": 2
+          },
+          "last_effective_date": "2026-10-16",
+          "missing_price_change_values": 1,
+          "quarantined_rows": 0,
+          "source_rows": 309
+        },
+        "fuel_oil_35s": {
+          "canonical_first_effective_date": "2024-05-30",
+          "canonical_last_effective_date": "2024-05-30",
+          "canonical_rows": 1,
+          "first_effective_date": "2018-08-22",
+          "interval_days": {
+            "11": 1,
+            "15": 26,
+            "16": 4,
+            "1643": 1
+          },
+          "last_effective_date": "2024-05-30",
+          "missing_price_change_values": 1,
+          "quarantined_rows": 32,
+          "source_rows": 33
+        },
+        "fuel_oil_3s": {
+          "canonical_first_effective_date": null,
+          "canonical_last_effective_date": null,
+          "canonical_rows": 0,
+          "first_effective_date": "2018-08-22",
+          "interval_days": {
+            "11": 1,
+            "15": 26,
+            "16": 4
+          },
+          "last_effective_date": "2019-11-30",
+          "missing_price_change_values": 1,
+          "quarantined_rows": 32,
+          "source_rows": 32
+        },
+        "gasoline_e10_ron95_iii": {
+          "canonical_first_effective_date": "2025-07-31",
+          "canonical_last_effective_date": "2026-10-16",
+          "canonical_rows": 73,
+          "first_effective_date": "2025-07-31",
+          "interval_days": {
+            "1": 6,
+            "2": 3,
+            "4": 1,
+            "5": 3,
+            "6": 5,
+            "7": 51,
+            "8": 3
+          },
+          "last_effective_date": "2026-10-16",
+          "missing_price_change_values": 0,
+          "quarantined_rows": 0,
+          "source_rows": 73
+        },
+        "gasoline_e5_ron92_ii": {
+          "canonical_first_effective_date": "2018-08-22",
+          "canonical_last_effective_date": "2026-10-16",
+          "canonical_rows": 309,
+          "first_effective_date": "2018-08-22",
+          "interval_days": {
+            "1": 6,
+            "2": 5,
+            "3": 1,
+            "4": 1,
+            "5": 5,
+            "6": 7,
+            "7": 135,
+            "8": 13,
+            "9": 7,
+            "10": 19,
+            "11": 13,
+            "12": 6,
+            "13": 3,
+            "14": 3,
+            "15": 69,
+            "16": 11,
+            "17": 1,
+            "19": 1,
+            "21": 2
+          },
+          "last_effective_date": "2026-10-16",
+          "missing_price_change_values": 1,
+          "quarantined_rows": 0,
+          "source_rows": 309
+        },
+        "gasoline_ron95_iii": {
+          "canonical_first_effective_date": "2018-08-22",
+          "canonical_last_effective_date": "2026-05-28",
+          "canonical_rows": 287,
+          "first_effective_date": "2018-08-22",
+          "interval_days": {
+            "1": 4,
+            "2": 5,
+            "3": 1,
+            "4": 1,
+            "5": 5,
+            "6": 6,
+            "7": 116,
+            "8": 13,
+            "9": 7,
+            "10": 19,
+            "11": 13,
+            "12": 6,
+            "13": 3,
+            "14": 3,
+            "15": 69,
+            "16": 11,
+            "17": 1,
+            "19": 1,
+            "21": 2
+          },
+          "last_effective_date": "2026-05-28",
+          "missing_price_change_values": 1,
+          "quarantined_rows": 0,
+          "source_rows": 287
+        },
+        "gasoline_ron95_iv": {
+          "canonical_first_effective_date": "2018-08-22",
+          "canonical_last_effective_date": "2019-01-01",
+          "canonical_rows": 10,
+          "first_effective_date": "2018-08-22",
+          "interval_days": {
+            "11": 1,
+            "15": 7,
+            "16": 1
+          },
+          "last_effective_date": "2019-01-01",
+          "missing_price_change_values": 1,
+          "quarantined_rows": 0,
+          "source_rows": 10
+        },
+        "kerosene_ko": {
+          "canonical_first_effective_date": "2018-08-22",
+          "canonical_last_effective_date": "2026-03-07",
+          "canonical_rows": 269,
+          "first_effective_date": "2018-08-22",
+          "interval_days": {
+            "2": 3,
+            "3": 1,
+            "5": 2,
+            "6": 4,
+            "7": 111,
+            "8": 12,
+            "9": 7,
+            "10": 19,
+            "11": 13,
+            "12": 6,
+            "13": 3,
+            "14": 3,
+            "15": 69,
+            "16": 11,
+            "17": 1,
+            "19": 1,
+            "21": 2
+          },
+          "last_effective_date": "2026-03-07",
+          "missing_price_change_values": 1,
+          "quarantined_rows": 0,
+          "source_rows": 269
+        }
+      },
+      "quarantined_rows": 64,
+      "rows_canonical": 1386,
+      "rows_read": 1450,
+      "schema_fingerprint_sha256": "6e76862985400abc3be847831ba924a8b52bdfdde6825bf278c1bb7ff0f684f4",
+      "source_file": "data_price_petro.csv",
+      "zero_prices_quarantined": 64
+    },
+    "usd_vnd": {
+      "distinct_dates": 2395,
+      "exact_duplicates_collapsed": 0,
+      "first_observation_date": "2018-08-22",
+      "interval_days": {
+        "1": 1960,
+        "2": 337,
+        "3": 79,
+        "4": 7,
+        "5": 3,
+        "6": 2,
+        "7": 1,
+        "8": 3,
+        "10": 2
+      },
+      "last_observation_date": "2026-10-16",
+      "missing_values": 0,
+      "quarantined_rows": 0,
+      "rows_canonical": 2395,
+      "rows_read": 2395,
+      "schema_fingerprint_sha256": "c008654d0084f363a803e32e91732a6fedd1e2e459c3327e4d5dee869707cc13",
+      "source_file": "usd_vnd_rates.csv"
+    }
+  },
+  "sources": [
+    {
+      "license_reuse_terms": "unknown; verify with publisher",
+      "publisher_or_attribution": "EIA, distributed by FRED",
+      "raw_filename": "brent_crude_prices.csv",
+      "retrieved_at_utc": "2026-10-21T03:30:48Z",
+      "row_count": 2126,
+      "schema_fingerprint_sha256": "a877ec7fd26b406d2348bb3d4072551b4eb8a72d43dbd39fcf866f6d977c94af",
+      "sha256": "978dd86442f1bdf6c8d8e3ea3da480a2d812b85a1cc02452d69c62cfa5b3ed30",
+      "snapshot_id": "978dd86442f1bdf6c8d8e3ea3da480a2d812b85a1cc02452d69c62cfa5b3ed30",
+      "source_id": "eia_fred",
+      "source_url": "https://fred.stlouisfed.org/data/DCOILBRENTEU"
+    },
+    {
+      "license_reuse_terms": "unknown; verify with publisher",
+      "publisher_or_attribution": "Algolab attributes values to GSO / SBV",
+      "raw_filename": "usd_vnd_rates.csv",
+      "retrieved_at_utc": "2026-10-21T03:35:19Z",
+      "row_count": 2395,
+      "schema_fingerprint_sha256": "c008654d0084f363a803e32e91732a6fedd1e2e459c3327e4d5dee869707cc13",
+      "sha256": "cbd671a7e8f4128f4c323e9b12af79006918a2514840c062a9bd66b42a0e8ad6",
+      "snapshot_id": "cbd671a7e8f4128f4c323e9b12af79006918a2514840c062a9bd66b42a0e8ad6",
+      "source_id": "sbv_reference_via_algolab",
+      "source_url": "https://algolab.vn/macro/vn-fx-rate-ty-gia-sbv-trung-tam"
+    },
+    {
+      "license_reuse_terms": "unknown; verify with publisher",
+      "publisher_or_attribution": "PVOIL",
+      "raw_filename": "data_price_petro.csv",
+      "retrieved_at_utc": "2026-10-19T07:23:45Z",
+      "row_count": 1450,
+      "schema_fingerprint_sha256": "6e76862985400abc3be847831ba924a8b52bdfdde6825bf278c1bb7ff0f684f4",
+      "sha256": "8c2bc06343687a922196f23923beee59ffe2f07b8f6f1b8f1fabf1bfd34c9379",
+      "snapshot_id": "8c2bc06343687a922196f23923beee59ffe2f07b8f6f1b8f1fabf1bfd34c9379",
+      "source_id": "pvoil",
+      "source_url": "https://pvoil.com.vn/tin-gia-xang-dau"
+    }
+  ],
+  "started_at_utc": "2026-10-22T03:54:01.791406Z"
+}

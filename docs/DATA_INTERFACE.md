@@ -19,7 +19,7 @@ The run directory contains:
 | `fuel_market_panel.csv` | (`product_id`, `effective_at_local`, `target_snapshot_id`) | Fuel events joined to the latest strictly prior observed Brent and FX rows. Use for event-level modeling. |
 | `quarantine.csv` | source file and row number | Rejected records with reason and original row JSON. Audit only; never use as valid targets/features. |
 | `quality_report.json` | one report per run | Source coverage, frequencies, missingness, counts, quarantine reasons and join availability. |
-| `manifest.json` | one entry per source file | Source attribution, retrieval time, schema fingerprint and file checksum. |
+| `manifest.json` | one entry per source file plus output checksums | Source attribution, retrieval time, schema fingerprint, and SHA-256/row count for each published table. |
 
 ## Serialization rules
 
