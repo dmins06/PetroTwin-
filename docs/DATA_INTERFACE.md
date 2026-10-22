@@ -6,9 +6,26 @@ The latest snapshot's acceptance findings are recorded in [data-foundation-accep
 
 ## How consumers find a dataset
 
-1. Read `data/processed/current.json` and obtain `run_id` and relative `path`.
+1. Open [`data/processed/current.json`](../data/processed/current.json) in the repository and obtain `run_id` and relative `path`. It currently points to `runs/a9b829f5915084070a99`.
 2. Read data only from `data/processed/<path>/`; never depend on a hard-coded run ID.
 3. Pin the `run_id` in experiment outputs so results can be reproduced. A run directory is immutable after publication.
+
+To load the integrated panel from a checkout:
+
+```python
+import json
+from pathlib import Path
+
+import pandas as pd
+
+root = Path(".")
+current = json.loads((root / "data/processed/current.json").read_text(encoding="utf-8"))
+run_dir = root / "data/processed" / current["path"]
+panel = pd.read_csv(run_dir / "fuel_market_panel.csv")
+print(current["run_id"], panel.shape)
+```
+
+On GitHub, open the pointer above, follow its `path` under `data/processed/`, then select the needed CSV or report. For an event-level modeling table, use `fuel_market_panel.csv`.
 
 The run directory contains:
 

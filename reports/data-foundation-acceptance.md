@@ -1,8 +1,10 @@
 # Data foundation acceptance
 
 **Contract:** `petrotwin-data-v1`  
-**Accepted snapshot:** `1849dea18e4bf43ee561` (published via `data/processed/current.json`)  
+**Accepted snapshot:** `a9b829f5915084070a99` (published via `data/processed/current.json`, 2026-10-22)
 **Decision:** Accept the schema, cleaning pipeline, and team interface for development use, with the source exceptions below kept visible. This is not a claim that every raw value or source license is verified.
+
+This snapshot supersedes `1849dea18e4bf43ee561`. Its four CSVs were rebuilt from the same raw snapshots and compared row-by-row with the earlier accepted outputs. The current manifest records the output row counts and SHA-256 checksums; see `data/processed/runs/a9b829f5915084070a99/manifest.json`.
 
 ## Reconciliation results
 
@@ -50,4 +52,4 @@ Only one raw snapshot per source is present, so changes across historical source
 
 ## Audit performed
 
-The acceptance audit compared raw and canonical row counts, distinct keys, unit domains, date coverage, NULL/status consistency, quarantine reasons, effective-time normalization, panel row cardinality, strict prior-date joins, lag calculations, and quality-report totals. All checked invariants passed for the accepted snapshot.
+The acceptance audit compared raw and canonical row counts, distinct keys, unit domains, date coverage, NULL/status consistency, quarantine reasons, effective-time normalization, panel row cardinality, strict prior-date joins, lag calculations, and quality-report totals. A rebuild with the committed pipeline reproduced the same run ID and output hashes on a second run. All checked invariants passed for the accepted snapshot.
