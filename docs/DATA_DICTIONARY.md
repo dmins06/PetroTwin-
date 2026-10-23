@@ -134,6 +134,7 @@ Run these checks before publishing processed data:
 6. Effective timestamps are strictly chronological within each product after sorting. Do not require every product to appear on every adjustment date.
 7. Report coverage, first/last observation, distinct dates, rows per date/product, interval distribution, weekday gaps, missing values, duplicate counts, out-of-range/zero values, and excluded/quarantined row counts. Frequency and gaps are diagnostics, not automatic failure, unless they violate a documented source calendar.
 8. Batch publication is atomic: row-level rejects are written to quarantine and excluded from the new validated snapshot; publish that snapshot only if every batch-level gate passes. If a batch-level gate fails, write diagnostics/quarantine output and leave the last valid processed snapshot unchanged.
+9. Fund annotations must have unique (`product_id`, `source_record_date`) keys, a known product, a valid ISO date, a non-negative integer amount, a product-compatible unit, and an HTTPS evidence URL. Each annotation must match exactly one valid fuel event; orphan or ambiguous annotations fail the batch. Amount `0` means verified no spending, a positive amount means verified spending, and no annotation leaves the output NULL/unverified.
 
 ## Current source assessment and unresolved decisions
 

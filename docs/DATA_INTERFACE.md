@@ -4,6 +4,16 @@ This is the stable handoff contract for `petrotwin-data-v3`. The authoritative f
 
 The latest snapshot's acceptance findings are recorded in [data-foundation-acceptance.md](../reports/data-foundation-acceptance.md).
 
+## Accepted snapshot and consumer contract
+
+The accepted snapshot at the 2026-10-23 audit is `28b22922e761cb08a8d8`: 2,128 Brent rows, 2,400 USD/VND rows, 1,390 valid fuel events, and 1,390 integrated panel rows. Sixty-four zero-price FO source rows are quarantined. See the acceptance record for product coverage, missingness, and source limits. Consumers must still resolve `current.json` at runtime; the ID above records the audited snapshot and is not a hard-coded lookup value.
+
+- Model input: `fuel_market_panel.csv`, one row per valid fuel-price event. Do not expand event rows to daily frequency or use quarantine rows as targets/features.
+- Source audit: `fuel_price_observation.csv` and `market_observation.csv` retain source-specific grain and provenance.
+- Missing market features and unverified fund annotations are NULL. Confirmed fund spending is `1`; confirmed no-spending is `0`.
+- Feature joins use only market observation dates strictly before each fuel event's local calendar date. Preserve the observation date, age, and snapshot identifiers with any extracted feature set.
+- The pipeline consumes local source snapshots and currently does not fetch new source data from the internet. Rebuild through the documented runner when raw snapshots or manual annotations are intentionally updated.
+
 ## How consumers find a dataset
 
 1. Open [`data/processed/current.json`](../data/processed/current.json) and obtain `run_id` and relative `path` for the latest published snapshot.

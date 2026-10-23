@@ -24,7 +24,7 @@ import yaml
 
 
 SCHEMA_VERSION = "petrotwin-data-v3"
-PIPELINE_VERSION = "1.2.0"
+PIPELINE_VERSION = "1.3.0"
 LOCAL_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 UTC = timezone.utc
 
@@ -44,6 +44,7 @@ PRODUCT_IDS = {
     "Xăng RON 95-III": "gasoline_ron95_iii",
     "Xăng RON 95-IV": "gasoline_ron95_iv",
 }
+PRODUCT_ID_SET = frozenset(PRODUCT_IDS.values())
 
 EXPECTED_HEADERS = {
     BRENT_FILE: [
@@ -510,13 +511,40 @@ def _apply_fund_annotations(fuel_rows: list[dict[str, Any]], annotation_path: Pa
         expected = ["product_id", "source_record_date", "amount", "unit", "source_url"]
         if reader.fieldnames != expected:
             raise PipelineError(f"invalid fund annotation headers in {annotation_path}")
-        for row in reader:
-            key = (row["product_id"], row["source_record_date"])
+        for row_number, row in enumerate(reader, start=2):
+            product_id = row["product_id"].strip()
+            source_record_date = row["source_record_date"].strip()
+            if product_id not in PRODUCT_ID_SET:
+                raise PipelineError(f"unknown product_id in fund annotation: {product_id!r}")
+            _parse_date(source_record_date, "source_record_date", annotation_path.name, row_number)
+            key = (product_id, source_record_date)
             if key in annotations:
                 raise PipelineError(f"duplicate fund annotation key: {key}")
-            if row["amount"] and (not row["amount"].isdigit() or row["unit"] not in {"VND/liter", "VND/kg"}):
+            amount = row["amount"].strip()
+            unit = row["unit"].strip()
+            source_url = row["source_url"].strip()
+            expected_unit = "VND/kg" if product_id == "fuel_oil_35s" else "VND/liter"
+            if not amount.isdigit() or unit != expected_unit:
                 raise PipelineError(f"invalid fund annotation amount or unit for {key}")
-            annotations[key] = row
+            if not source_url.startswith("https://"):
+                raise PipelineError(f"fund annotation requires an HTTPS source URL for {key}")
+            annotations[key] = {
+                "product_id": product_id,
+                "source_record_date": source_record_date,
+                "amount": amount,
+                "unit": unit,
+                "source_url": source_url,
+            }
+
+    target_counts = Counter(
+        (row["product_id"], row["source_record_date"]) for row in fuel_rows
+    )
+    for key in annotations:
+        if target_counts[key] == 0:
+            raise PipelineError(f"orphan fund annotation has no valid fuel event: {key}")
+        if target_counts[key] > 1:
+            raise PipelineError(f"fund annotation matches multiple fuel events: {key}")
+
     count = 0
     for row in fuel_rows:
         annotation = annotations.get((row["product_id"], row["source_record_date"]))
@@ -525,9 +553,60 @@ def _apply_fund_annotations(fuel_rows: list[dict[str, Any]], annotation_path: Pa
         row["stabilization_fund_subsidy_amount"] = annotation["amount"]
         row["stabilization_fund_subsidy_unit"] = annotation["unit"]
         row["stabilization_fund_source_url"] = annotation["source_url"]
-        row["stabilization_fund_subsidy"] = "1" if annotation["amount"] and int(annotation["amount"]) > 0 else "0"
+        row["stabilization_fund_subsidy"] = "1" if int(annotation["amount"]) > 0 else "0"
         count += 1
     return count
+
+
+def _validate_integrated_outputs(
+    fuel_rows: list[dict[str, Any]],
+    market_rows: list[dict[str, Any]],
+    panel_rows: list[dict[str, Any]],
+) -> None:
+    """Fail publication if joins lose events, duplicate keys, or introduce look-ahead."""
+    expected_series = {"brent_dated_usd_bbl", "usd_vnd_sbv_reference"}
+    observed_series = {row["series_id"] for row in market_rows}
+    if not expected_series.issubset(observed_series):
+        raise PipelineError(
+            f"market outputs are missing required series: {sorted(expected_series - observed_series)}"
+        )
+    if len(panel_rows) != len(fuel_rows):
+        raise PipelineError(
+            f"panel cardinality mismatch: fuel={len(fuel_rows)}, panel={len(panel_rows)}"
+        )
+
+    fuel_keys = {
+        (row["product_id"], row["effective_at_local"], row["snapshot_id"])
+        for row in fuel_rows
+    }
+    panel_keys = [
+        (row["product_id"], row["effective_at_local"], row["target_snapshot_id"])
+        for row in panel_rows
+    ]
+    if len(fuel_keys) != len(fuel_rows) or len(set(panel_keys)) != len(panel_keys):
+        raise PipelineError("duplicate event key in fuel or integrated panel outputs")
+    if set(panel_keys) != fuel_keys:
+        raise PipelineError("panel keys do not match canonical fuel-price event keys")
+
+    for row in panel_rows:
+        event_date = date.fromisoformat(row["effective_at_local"][:10])
+        for prefix, date_field, value_field, age_field in (
+            ("brent", "brent_observation_date", "brent_usd_per_barrel", "brent_age_days"),
+            ("fx", "fx_observation_date", "usd_vnd_rate", "fx_age_days"),
+        ):
+            observation_date = row[date_field]
+            if not observation_date:
+                if row[value_field] or row[age_field] or row[f"{prefix}_snapshot_id"]:
+                    raise PipelineError(f"incomplete {prefix} feature provenance in panel")
+                continue
+            parsed_observation_date = date.fromisoformat(observation_date)
+            age_days = int(row[age_field])
+            if parsed_observation_date >= event_date:
+                raise PipelineError(f"{prefix} feature is not strictly prior to fuel event")
+            if age_days != (event_date - parsed_observation_date).days or age_days < 1:
+                raise PipelineError(f"invalid {prefix} feature age in panel")
+            if not row[value_field] or not row[f"{prefix}_snapshot_id"]:
+                raise PipelineError(f"incomplete {prefix} feature value or provenance in panel")
 
 
 def _manifest_entry(path: Path, source_id: str, publisher: str, fingerprint: str) -> dict[str, Any]:
@@ -684,6 +763,7 @@ def run_pipeline(
             "fuel_price_observation",
         )
         panel_rows, missing_prior_market = _integrate_fuel_market(fuel, market_rows)
+        _validate_integrated_outputs(fuel, market_rows, panel_rows)
         all_quarantine = brent_q + fx_q + fuel_q
 
         # Load source row counts and schema fingerprints for a complete provenance manifest.
