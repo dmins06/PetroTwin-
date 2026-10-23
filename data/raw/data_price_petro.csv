@@ -1,4 +1,4 @@
-﻿date,effective_date,effective_time,product_name,price_vnd_per_liter,price_display,price_change_vnd,price_change_display,unit,includes_vat_and_environmental_tax,source_url,extracted_at_utc
+date,effective_date,effective_time,product_name,price_vnd_per_liter,price_display,price_change_vnd,price_change_display,unit,includes_vat_and_environmental_tax,source_url,extracted_at_utc
 2018-08-22,2018-08-21,24:00,"Dầu DO 0,005S-IV",17730,17.730 đ,,,Đồng/lít thực tế,true,https://pvoil.com.vn/tin-gia-xang-dau,2026-10-19T07:23:45Z
 2018-08-22,2018-08-21,24:00,"Dầu DO 0,05S-II",17680,17.680 đ,,,Đồng/lít thực tế,true,https://pvoil.com.vn/tin-gia-xang-dau,2026-10-19T07:23:45Z
 2018-08-22,2018-08-21,24:00,"Dầu FO 3,5%S",0,0 đ,,,Đồng/lít thực tế,true,https://pvoil.com.vn/tin-gia-xang-dau,2026-10-19T07:23:45Z
@@ -1449,3 +1449,7 @@
 2026-10-16,2026-10-15,24:00,"Dầu DO 0,05S-II",28750,28.750 đ,-350,-350,Đồng/lít thực tế,true,https://pvoil.com.vn/tin-gia-xang-dau,2026-10-19T07:23:45Z
 2026-10-16,2026-10-15,24:00,Xăng E10 RON 95-III,26670,26.670 đ,-350,-350,Đồng/lít thực tế,true,https://pvoil.com.vn/tin-gia-xang-dau,2026-10-19T07:23:45Z
 2026-10-16,2026-10-15,24:00,Xăng E5 RON 92-II,26620,26.620 đ,-350,-350,Đồng/lít thực tế,true,https://pvoil.com.vn/tin-gia-xang-dau,2026-10-19T07:23:45Z
+2026-10-22,2026-10-22,15:00,Xăng E10 RON 95-III,24860,24.860 đ,-1810,-1810,Đồng/lít thực tế,true,https://www.pvoil.com.vn/tin-gia-xang-dau,2026-10-23T06:02:10Z
+2026-10-22,2026-10-22,15:00,Xăng E5 RON 92-II,25010,25.010 đ,-1610,-1610,Đồng/lít thực tế,true,https://www.pvoil.com.vn/tin-gia-xang-dau,2026-10-23T06:02:10Z
+2026-10-22,2026-10-22,15:00,"Dầu DO 0,05S-II",29200,29.200 đ,450,+450,Đồng/lít thực tế,true,https://www.pvoil.com.vn/tin-gia-xang-dau,2026-10-23T06:02:10Z
+2026-10-22,2026-10-22,15:00,"Dầu DO 0,001S-V",30600,30.600 đ,400,+400,Đồng/lít thực tế,true,https://www.pvoil.com.vn/tin-gia-xang-dau,2026-10-23T06:02:10Z

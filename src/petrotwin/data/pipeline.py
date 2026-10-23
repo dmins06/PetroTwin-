@@ -23,8 +23,8 @@ from zoneinfo import ZoneInfo
 import yaml
 
 
-SCHEMA_VERSION = "petrotwin-data-v1"
-PIPELINE_VERSION = "1.0.0"
+SCHEMA_VERSION = "petrotwin-data-v3"
+PIPELINE_VERSION = "1.2.0"
 LOCAL_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 UTC = timezone.utc
 
@@ -446,6 +446,11 @@ def _parse_fuel(
             "price_value": _decimal_text(price),
             "unit_code": "VND/liter",
             "price_change_value": _decimal_text(change),
+            # PVOIL does not report stabilization-fund data; the annotation overlay fills it.
+            "stabilization_fund_subsidy": "",
+            "stabilization_fund_subsidy_amount": "",
+            "stabilization_fund_subsidy_unit": "VND/liter" if product_id != "fuel_oil_35s" else "VND/kg",
+            "stabilization_fund_source_url": "",
             "tax_included": tax_raw,
             "source_id": "pvoil",
             "snapshot_id": snapshot_id,
@@ -493,6 +498,36 @@ def _parse_fuel(
         "schema_fingerprint_sha256": schema_fingerprint,
     }
     return output, quarantine, quality
+
+
+def _apply_fund_annotations(fuel_rows: list[dict[str, Any]], annotation_path: Path) -> int:
+    """Apply reviewed, date-and-product keyed MOIT fund-use annotations."""
+    if not annotation_path.is_file():
+        return 0
+    annotations: dict[tuple[str, str], dict[str, str]] = {}
+    with annotation_path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        expected = ["product_id", "source_record_date", "amount", "unit", "source_url"]
+        if reader.fieldnames != expected:
+            raise PipelineError(f"invalid fund annotation headers in {annotation_path}")
+        for row in reader:
+            key = (row["product_id"], row["source_record_date"])
+            if key in annotations:
+                raise PipelineError(f"duplicate fund annotation key: {key}")
+            if row["amount"] and (not row["amount"].isdigit() or row["unit"] not in {"VND/liter", "VND/kg"}):
+                raise PipelineError(f"invalid fund annotation amount or unit for {key}")
+            annotations[key] = row
+    count = 0
+    for row in fuel_rows:
+        annotation = annotations.get((row["product_id"], row["source_record_date"]))
+        if annotation is None:
+            continue
+        row["stabilization_fund_subsidy_amount"] = annotation["amount"]
+        row["stabilization_fund_subsidy_unit"] = annotation["unit"]
+        row["stabilization_fund_source_url"] = annotation["source_url"]
+        row["stabilization_fund_subsidy"] = "1" if annotation["amount"] and int(annotation["amount"]) > 0 else "0"
+        count += 1
+    return count
 
 
 def _manifest_entry(path: Path, source_id: str, publisher: str, fingerprint: str) -> dict[str, Any]:
@@ -559,6 +594,10 @@ def _integrate_fuel_market(
             "effective_at_local": fuel["effective_at_local"],
             "price_value": fuel["price_value"],
             "price_change_value": fuel["price_change_value"],
+            "stabilization_fund_subsidy": fuel["stabilization_fund_subsidy"],
+            "stabilization_fund_subsidy_amount": fuel["stabilization_fund_subsidy_amount"],
+            "stabilization_fund_subsidy_unit": fuel["stabilization_fund_subsidy_unit"],
+            "stabilization_fund_source_url": fuel["stabilization_fund_source_url"],
             "unit_code": fuel["unit_code"],
             "target_source_id": fuel["source_id"],
             "target_snapshot_id": fuel["snapshot_id"],
@@ -604,7 +643,10 @@ def run_pipeline(
         if missing_files:
             raise PipelineError(f"missing required raw source files: {missing_files}")
 
+        annotation_path = raw_dir.parent / "manual" / "stabilization_fund_annotations.csv"
         file_hashes = {path.name: _sha256(path) for path in files}
+        if annotation_path.is_file():
+            file_hashes["manual/stabilization_fund_annotations.csv"] = _sha256(annotation_path)
         pipeline_hash = _sha256(Path(__file__))
         run_seed = json.dumps({
             "schema_version": SCHEMA_VERSION,
@@ -629,6 +671,7 @@ def run_pipeline(
         fuel, fuel_q, fuel_quality = _parse_fuel(
             files[2], file_hashes[files[2].name], EXPECTED_HEADERS[FUEL_FILE]
         )
+        fund_annotations_applied = _apply_fund_annotations(fuel, annotation_path)
 
         market_rows, market_duplicates = _dedupe_or_fail(
             brent + fx,
@@ -652,6 +695,23 @@ def run_pipeline(
         ]
         for path, source_id, publisher, fingerprint in manifest_specs:
             manifests.append(_manifest_entry(path, source_id, publisher, fingerprint))
+        if annotation_path.is_file():
+            with annotation_path.open("r", encoding="utf-8-sig", newline="") as stream:
+                annotation_count = sum(1 for _ in csv.DictReader(stream))
+            manifests.append({
+                "snapshot_id": file_hashes["manual/stabilization_fund_annotations.csv"],
+                "source_id": "moit_manual_annotations",
+                "source_url": "https://moit.gov.vn/",
+                "publisher_or_attribution": "Ministry of Industry and Trade; manually transcribed adjustment notices",
+                "license_reuse_terms": "official-source attribution required",
+                "retrieved_at_utc": started_at,
+                "raw_filename": "manual/stabilization_fund_annotations.csv",
+                "sha256": file_hashes["manual/stabilization_fund_annotations.csv"],
+                "row_count": annotation_count,
+                "schema_fingerprint_sha256": hashlib.sha256(
+                    b"product_id,source_record_date,amount,unit,source_url"
+                ).hexdigest(),
+            })
 
         quality = {
             "run_id": run_id,
@@ -669,6 +729,7 @@ def run_pipeline(
                 "market_observation_rows": len(market_rows),
                 "fuel_price_observation_rows": len(fuel),
                 "fuel_market_panel_rows": len(panel_rows),
+                "stabilization_fund_annotations_applied": fund_annotations_applied,
                 "fuel_events_without_prior_market_observation": missing_prior_market,
                 "exact_duplicate_keys_collapsed": (
                     brent_quality["exact_duplicates_collapsed"]
@@ -708,12 +769,18 @@ def run_pipeline(
             _write_csv(staging_dir / "fuel_price_observation.csv", fuel, [
                 "product_id", "source_product_name", "source_record_date", "effective_at_local",
                 "effective_time_24_00_normalized", "price_value", "unit_code",
-                "price_change_value", "tax_included", "source_id", "snapshot_id", "source_url",
+                "price_change_value", "stabilization_fund_subsidy", "tax_included",
+                "stabilization_fund_subsidy_amount", "stabilization_fund_subsidy_unit",
+                "stabilization_fund_source_url",
+                "source_id", "snapshot_id", "source_url",
                 "retrieved_at_utc", "schema_version",
             ])
             _write_csv(staging_dir / "fuel_market_panel.csv", panel_rows, [
                 "product_id", "source_product_name", "source_record_date", "effective_at_local",
-                "price_value", "price_change_value", "unit_code", "target_source_id",
+                "price_value", "price_change_value", "stabilization_fund_subsidy",
+                "stabilization_fund_subsidy_amount", "stabilization_fund_subsidy_unit",
+                "stabilization_fund_source_url",
+                "unit_code", "target_source_id",
                 "target_snapshot_id", "brent_source_id", "brent_snapshot_id",
                 "brent_observation_date", "brent_usd_per_barrel", "brent_age_days",
                 "brent_usd_per_barrel_unit", "fx_source_id", "fx_snapshot_id",

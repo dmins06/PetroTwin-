@@ -27,6 +27,7 @@ logs/**
 *.pkl
 *.parquet
 *.csv
+!data/manual/*.csv
 
 # Generated report assets
 reports/figures/generated/**

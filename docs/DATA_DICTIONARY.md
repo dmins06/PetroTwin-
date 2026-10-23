@@ -1,6 +1,6 @@
 # Canonical data schema and cleaning rules
 
-This contract is `petrotwin-data-v1`. Raw files are immutable. Parse each source into a source-specific staging table, validate it, then publish canonical tables. Store rejected rows and a reason code in an interim quarantine output. Row-level exceptions may be quarantined while publishing the remaining validated rows only when all batch-level gates pass; a batch-level failure must not replace any part of the last valid processed snapshot.
+This contract is `petrotwin-data-v3`. Raw files are immutable. Parse each source into a source-specific staging table, validate it, then publish canonical tables. Store rejected rows and a reason code in an interim quarantine output. Row-level exceptions may be quarantined while publishing the remaining validated rows only when all batch-level gates pass; a batch-level failure must not replace any part of the last valid processed snapshot.
 
 ## Canonical tables
 
@@ -22,7 +22,7 @@ One row per market series and observation date (and source vintage, if the provi
 | `source_value` | string, nullable | Original displayed source value, retained for audit. |
 | `source_url` | string | URL recorded in the source snapshot. |
 | `retrieved_at_utc` | TIMESTAMP WITH TIME ZONE | UTC extraction time, parsed from `extracted_at_utc`. |
-| `schema_version` | string | `petrotwin-data-v1`. |
+| `schema_version` | string | `petrotwin-data-v3`. |
 
 Primary key in ingestion history: (`series_id`, `observation_date`, `source_id`, `snapshot_id`). The current published view selects one validated snapshot per source. Do not combine snapshots unless revisions are intentionally being modeled.
 
@@ -40,12 +40,16 @@ One row per fuel product and effective instant. A price adjustment is an event; 
 | `price_value` | DECIMAL | Domestic price; must be positive for a publishable price observation. |
 | `unit_code` | enum | `VND/liter` for the current products. Never combine with market units. |
 | `price_change_value` | DECIMAL, nullable | Signed source change, if provided. NULL is allowed when not reported (including the first observation); do not infer it during ingestion. |
+| `stabilization_fund_subsidy` | integer, nullable | `1` if the official record confirms fund spending for that product and period; `0` if it confirms no spending; NULL means not researched or not verified. |
+| `stabilization_fund_subsidy_amount` | integer, nullable | Confirmed fund spending per unit for that product and period. NULL means not researched or not verified. |
+| `stabilization_fund_subsidy_unit` | string | Unit for the fund spending amount: `VND/liter` or `VND/kg`. |
+| `stabilization_fund_source_url` | string, nullable | Official MOIT source supporting the annotation. |
 | `tax_included` | boolean, nullable | Parse source field; do not default when absent or malformed. |
 | `source_id` | string | `pvoil` for the current snapshot. |
 | `snapshot_id` | string | Non-null ID of the immutable ingested file; joins to the manifest. |
 | `source_url` | string | URL recorded in the source snapshot. |
 | `retrieved_at_utc` | TIMESTAMP WITH TIME ZONE | UTC extraction time. |
-| `schema_version` | string | `petrotwin-data-v1`. |
+| `schema_version` | string | `petrotwin-data-v3`. |
 
 Primary key in ingestion history: (`product_id`, `effective_at_local`, `source_id`, `snapshot_id`). The current published view selects one validated snapshot per source. Do not use `source_record_date` as the event key: it may differ from the effective date.
 
@@ -61,6 +65,10 @@ One row per validated fuel-price event, created by joining the two canonical mar
 | `effective_at_local` | TIMESTAMP WITH TIME ZONE | Fuel event time, `Asia/Ho_Chi_Minh`, serialized with `+07:00`. |
 | `price_value` | DECIMAL | Target price, `VND/liter`; positive and non-NULL. |
 | `price_change_value` | DECIMAL, nullable | Reported signed change; blank if source did not provide it. |
+| `stabilization_fund_subsidy` | integer, nullable | Verified `0`/`1` label copied from the fuel price observation; blank means not researched or not verified. |
+| `stabilization_fund_subsidy_amount` | integer, nullable | Confirmed fund spending per unit, copied from the fuel price observation. |
+| `stabilization_fund_subsidy_unit` | string | Unit for the amount: `VND/liter` or `VND/kg`. |
+| `stabilization_fund_source_url` | string, nullable | Official MOIT source supporting the annotation. |
 | `unit_code` | enum | Always `VND/liter` for current fuel targets. |
 | `target_source_id`, `target_snapshot_id` | string | Identifies the source event and raw snapshot. |
 | `brent_source_id`, `brent_snapshot_id` | string | Provenance for the selected Brent feature; blank when no prior observation exists. |
@@ -73,7 +81,7 @@ One row per validated fuel-price event, created by joining the two canonical mar
 | `usd_vnd_rate` | DECIMAL, nullable | Selected FX value, `VND/USD`. |
 | `fx_age_days` | integer, nullable | Calendar days from selected FX date to fuel event date; at least 1. |
 | `usd_vnd_rate_unit` | enum | Always `VND/USD`. |
-| `schema_version` | string | `petrotwin-data-v1`. |
+| `schema_version` | string | `petrotwin-data-v3`. |
 
 Panel key: (`product_id`, `effective_at_local`, `target_snapshot_id`). Use this table for event-level model input; use the two canonical source tables for source-specific analysis.
 

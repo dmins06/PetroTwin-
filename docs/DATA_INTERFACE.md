@@ -1,12 +1,12 @@
 # Team data interface
 
-This is the stable handoff contract for `petrotwin-data-v1`. The authoritative field definitions and cleaning rules are in [DATA_DICTIONARY.md](DATA_DICTIONARY.md).
+This is the stable handoff contract for `petrotwin-data-v3`. The authoritative field definitions and cleaning rules are in [DATA_DICTIONARY.md](DATA_DICTIONARY.md).
 
 The latest snapshot's acceptance findings are recorded in [data-foundation-acceptance.md](../reports/data-foundation-acceptance.md).
 
 ## How consumers find a dataset
 
-1. Open [`data/processed/current.json`](../data/processed/current.json) in the repository and obtain `run_id` and relative `path`. It currently points to `runs/a9b829f5915084070a99`.
+1. Open [`data/processed/current.json`](../data/processed/current.json) and obtain `run_id` and relative `path` for the latest published snapshot.
 2. Read data only from `data/processed/<path>/`; never depend on a hard-coded run ID.
 3. Pin the `run_id` in experiment outputs so results can be reproduced. A run directory is immutable after publication.
 
@@ -44,7 +44,8 @@ The run directory contains:
 - Decimal values are serialized without thousands separators. Blank CSV cells represent NULL. Do not interpret blanks as zero.
 - Boolean cells are lowercase `true` or `false`.
 - `unit_code` values are exactly `USD/bbl`, `VND/USD`, and `VND/liter`, matched to their series/table. The panel also has explicit per-feature unit columns.
-- Do not rename, reorder, drop, or reinterpret v1 columns locally. If an interface change is needed, coordinate it, increment the schema version, update parsers/consumers, and publish a new run.
+- Do not rename, reorder, drop, or reinterpret v3 columns locally. If an interface change is needed, coordinate it, increment the schema version, update parsers/consumers, and publish a new run.
+- Stabilization-fund fields are maintained in `data/manual/stabilization_fund_annotations.csv`, keyed by product and source record date. Amounts are VND/liter, except mazut which is VND/kg. `stabilization_fund_subsidy` is derived as `1` when the confirmed amount is positive and `0` when the official source confirms no spending. Blank values mean the period has not been verified. PVOIL does not provide this information.
 - Join Brent/FX to fuel only using the selected observation date and snapshot IDs in `fuel_market_panel.csv`. The selected date must be strictly earlier than the event's local calendar date. NULL market features mean no earlier observed value was available in the source snapshot.
 
 ## Product IDs
