@@ -31,3 +31,5 @@ These are starting ownership suggestions, not exclusive boundaries. Agree on int
 - Keep configuration that is safe to share in `configs/`; use `.env` for local credentials and never commit it.
 - Do not commit raw/processed data, forecast logs, model binaries, or generated plots. Store small synthetic fixtures in tests when needed.
 - Use a pull request for shared changes. State the data assumptions, time split, and validation evidence for model changes.
+
+M2's ordered tasks, dependencies, deliverables, and acceptance gates are tracked in [M2_WORKPLAN.md](M2_WORKPLAN.md).
