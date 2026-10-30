@@ -6,6 +6,7 @@
 .devcontainer/.mysql-client.cnf
 .venv/
 venv/
+src/petrotwin.egg-info/
 __pycache__/
 *.py[cod]
 

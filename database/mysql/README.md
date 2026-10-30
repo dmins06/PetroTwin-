@@ -32,7 +32,33 @@ The v3 CSV interface remains the handoff contract for M3/M4/M5. SQL `DATETIME` h
 
 ## Initial migration
 
-On MySQL 26.10, apply `001_initial_schema.sql` once to create the database, tables, constraints, and current-view definitions. Then apply `002_seed_reference_data.sql` to insert the controlled fuel-product and market-series IDs. The seed migration is safe to reapply. These migrations do not load observations; the T13 loader and reconciliation remain separate work. Confirm the actual server version with `SELECT VERSION()` before applying them.
+On MySQL 26.10, apply `001_initial_schema.sql` once to create the database, tables, constraints, and current-view definitions. Then apply `002_seed_reference_data.sql` to insert the controlled fuel-product and market-series IDs. The seed migration is safe to reapply. These migrations do not load observations; use the separate T13 loader below after confirming the actual server version with `SELECT VERSION()`.
+
+## T13 accepted-run loader
+
+`src/petrotwin/data/mysql_loader.py` reads the run selected by `data/processed/current.json`. It verifies source and output SHA-256 values (allowing Git's Windows newline conversion), manifest row counts, source schema fingerprints, primary-key uniqueness, strict-prior Brent/FX features, manual annotation keys, and quarantine counts. It uses the existing processed v3 outputs; it does not clean or edit CSVs. Blank numeric cells stay SQL `NULL`.
+
+From the repository root in the VS Code PowerShell terminal, first run the read-only preflight:
+
+```powershell
+$env:PYTHONUTF8 = '1'
+python -m pip install -e '.[mysql]'
+$env:PYTHONPATH = 'src'
+python -m petrotwin.data.mysql_loader
+```
+
+Publishing requires the explicit `--load` flag and the `PETROTWIN_DB_HOST`, `PETROTWIN_DB_PORT`, `PETROTWIN_DB_NAME`, `PETROTWIN_DB_USER`, and `PETROTWIN_DB_PASSWORD` environment variables. Set them in the current terminal/session or a secret manager; `.env.example` lists names only and is not read automatically by this command. Do not put the password in a command argument or tracked file. Example with a hidden Windows credential prompt:
+
+```powershell
+$dbCredential = Get-Credential -UserName root -Message 'Local PetroTwin MySQL password'
+$env:PETROTWIN_DB_PASSWORD = $dbCredential.GetNetworkCredential().Password
+python -m petrotwin.data.mysql_loader --load
+Remove-Item Env:PETROTWIN_DB_PASSWORD
+```
+
+The load inserts the dataset run, its source provenance, canonical observations, annotations, panel, quarantine, and quality report in one transaction. It performs count reconciliation before changing the current pointer; any error rolls the transaction back. A run ID that already exists is checked and never auto-repaired or overwritten. The loader refuses to move the pointer backwards to an older run. Use a development database; do not run against shared or production data without the team's approval. After loading, run the read-only `003_reconcile_run.sql` query and record its output in `reports/mysql-reconciliation.md`.
+
+The source CSV retains its displayed values exactly. MySQL stores `source_value` as `DECIMAL`, so the loader removes valid thousands-grouping commas (for example, `22,674` becomes numeric `22674`) when inserting that audit value; the raw source text remains available in the immutable CSV snapshot.
 
 ## GitHub Codespaces practice environment
 
@@ -60,4 +86,3 @@ SHOW FULL TABLES IN petrotwin;
 The service is for development practice only. Keep credentials out of chat, SQL files, and Git. The `mysql-data-v2` volume provides a clean initialization for this credential setup; previous development volumes are left untouched. On a fresh Codespace, re-check `SELECT VERSION()` before using the database.
 
 Before connecting a deployed service, supply credentials through environment variables/secret management and grant only the required schema privileges. Do not put credentials in this migration or commit them in `.env`.
-

@@ -193,5 +193,3 @@ JOIN dataset_current_pointer c ON c.singleton_id = 1 AND c.run_id = o.run_id;
 CREATE VIEW v_current_fuel_price_observation AS
 SELECT o.* FROM fuel_price_observation o
 JOIN dataset_current_pointer c ON c.singleton_id = 1 AND c.run_id = o.run_id;
-
-
