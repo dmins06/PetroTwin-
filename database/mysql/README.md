@@ -1,6 +1,6 @@
 # MySQL storage design
 
-This initial schema implements the M2 T12 logical model for **MySQL 26.7 / InnoDB**. It mirrors `petrotwin-data-v3` while adding `run_id` to database keys so accepted outputs from different pipeline runs can coexist without overwriting one another.
+This initial schema implements the M2 T12 logical model for **MySQL 26.10 / InnoDB**. It mirrors `petrotwin-data-v3` while adding `run_id` to database keys so accepted outputs from different pipeline runs can coexist without overwriting one another.
 
 ## Grain and table responsibilities
 
@@ -32,7 +32,31 @@ The v3 CSV interface remains the handoff contract for M3/M4/M5. SQL `DATETIME` h
 
 ## Initial migration
 
-On MySQL 26.7, apply `001_initial_schema.sql` once to create the database, tables, constraints, and current-view definitions. Then apply `002_seed_reference_data.sql` to insert the controlled fuel-product and market-series IDs. The seed migration is safe to reapply. These migrations do not load observations; the T13 loader and reconciliation remain separate work. Confirm the actual server version with `SELECT VERSION()` before applying it; the local machine currently has MySQL 8.0 client binaries and no server listening on `127.0.0.1:3306`.
+On MySQL 26.10, apply `001_initial_schema.sql` once to create the database, tables, constraints, and current-view definitions. Then apply `002_seed_reference_data.sql` to insert the controlled fuel-product and market-series IDs. The seed migration is safe to reapply. These migrations do not load observations; the T13 loader and reconciliation remain separate work. Confirm the actual server version with `SELECT VERSION()` before applying them.
+
+## GitHub Codespaces practice environment
+
+The repository dev container starts a private MySQL 26.10 service. It generates a random root password at first initialization; the password is not stored in the repository. From the Codespaces terminal, view the service log locally and keep the generated password private:
+
+```bash
+docker compose -f .devcontainer/docker-compose.yml logs mysql
+```
+
+Connect from the Codespaces workspace using the service hostname `mysql`:
+
+```bash
+mysql -h mysql -u root -p
+```
+
+Enter the generated password at the prompt. At the MySQL prompt, apply each migration once:
+
+```sql
+SOURCE database/mysql/001_initial_schema.sql;
+SOURCE database/mysql/002_seed_reference_data.sql;
+SHOW FULL TABLES IN petrotwin;
+```
+
+The service is for development practice only. Keep credentials out of chat, SQL files, and Git. On a fresh Codespace, re-check `SELECT VERSION()` before using the database.
 
 Before connecting a deployed service, supply credentials through environment variables/secret management and grant only the required schema privileges. Do not put credentials in this migration or commit them in `.env`.
 
