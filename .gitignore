@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+.devcontainer/.mysql.env
+.devcontainer/.mysql-client.cnf
 .venv/
 venv/
 __pycache__/

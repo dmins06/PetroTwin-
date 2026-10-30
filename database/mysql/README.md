@@ -36,19 +36,20 @@ On MySQL 26.10, apply `001_initial_schema.sql` once to create the database, tabl
 
 ## GitHub Codespaces practice environment
 
-The repository dev container starts a private MySQL 26.10 service. It generates a random root password at first initialization; the password is not stored in the repository. From the Codespaces terminal, view the service log locally and keep the generated password private:
+The repository dev container starts a private MySQL 26.10 service. Before the containers start, Codespaces creates a random local development password in `.devcontainer/.mysql.env`. Git ignores that file, so it is not pushed to GitHub. The workspace uses `mycli` with PyMySQL's RSA support so the client can authenticate with MySQL's `caching_sha2_password` method; the MariaDB client bundled by Debian may not support it.
 
 ```bash
-docker compose -f .devcontainer/docker-compose.yml logs mysql
+mycli --defaults-file .devcontainer/.mysql-client.cnf
 ```
 
-Connect from the Codespaces workspace using the service hostname `mysql`:
+At the `mycli` prompt, select the project database and verify the server:
 
 ```bash
-mysql -h mysql -u root -p
+USE petrotwin;
+SELECT VERSION();
 ```
 
-Enter the generated password at the prompt. At the MySQL prompt, apply each migration once:
+Apply each migration once:
 
 ```sql
 SOURCE database/mysql/001_initial_schema.sql;
@@ -56,7 +57,7 @@ SOURCE database/mysql/002_seed_reference_data.sql;
 SHOW FULL TABLES IN petrotwin;
 ```
 
-The service is for development practice only. Keep credentials out of chat, SQL files, and Git. On a fresh Codespace, re-check `SELECT VERSION()` before using the database.
+The service is for development practice only. Keep credentials out of chat, SQL files, and Git. The `mysql-data-v2` volume provides a clean initialization for this credential setup; previous development volumes are left untouched. On a fresh Codespace, re-check `SELECT VERSION()` before using the database.
 
 Before connecting a deployed service, supply credentials through environment variables/secret management and grant only the required schema privileges. Do not put credentials in this migration or commit them in `.env`.
 

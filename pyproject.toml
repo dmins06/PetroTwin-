@@ -30,6 +30,10 @@ eda = [
     "ipykernel>=6.29",
     "matplotlib>=3.8",
 ]
+mysql = [
+    "mycli>=2.3",
+    "PyMySQL[rsa]>=1.1",
+]
 dev = [
     "httpx>=0.27",
     "pytest>=8.0",

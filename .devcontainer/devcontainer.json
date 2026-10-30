@@ -1,9 +1,10 @@
 {
   "name": "PetroTwin M2",
+  "initializeCommand": "bash \"${localWorkspaceFolder}/.devcontainer/generate_mysql_env.sh\"",
   "dockerComposeFile": "docker-compose.yml",
   "service": "workspace",
   "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
-  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y default-mysql-client && python -m pip install -e '.[eda]'",
+  "postCreateCommand": "python -m pip install -e '.[eda,mysql]' && bash .devcontainer/setup_mysql_client.sh",
   "customizations": {
     "vscode": {
       "extensions": [
