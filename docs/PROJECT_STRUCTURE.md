@@ -4,8 +4,10 @@
 
 | Area | Main work | Suggested lead |
 |---|---|---|
+| `.devcontainer/` | Reproducible Codespaces workspace and private MySQL practice service | M2 |
 | `data/`, `src/petrotwin/data/` | Source inventory, ingestion, cleaning, validation, and database-ready schemas | M1, M2 |
 | `notebooks/01_eda/` | Data quality review, trends, distributions, and adjustment-period analysis | M2 |
+| `database/mysql/` | MySQL/InnoDB migrations, reference IDs, and later CSV-to-database reconciliation | M2 |
 | `src/petrotwin/features/`, `notebooks/02_feature_engineering/` | Target definition, temporal alignment, lags, and leakage checks | M3 |
 | `src/petrotwin/models/`, `notebooks/03_model_experiments/` | Naive baseline, SARIMAX, XGBoost, and explainability experiments | M3, M4 |
 | `src/petrotwin/evaluation/` | Chronological backtests, common test windows, MAE/RMSE, and error analysis | M5 with model owners |
@@ -31,3 +33,5 @@ These are starting ownership suggestions, not exclusive boundaries. Agree on int
 - Keep configuration that is safe to share in `configs/`; use `.env` for local credentials and never commit it.
 - Do not commit raw/processed data, forecast logs, model binaries, or generated plots. Store small synthetic fixtures in tests when needed.
 - Use a pull request for shared changes. State the data assumptions, time split, and validation evidence for model changes.
+
+M2's ordered tasks, dependencies, deliverables, and acceptance gates are tracked in [M2_WORKPLAN.md](M2_WORKPLAN.md).
