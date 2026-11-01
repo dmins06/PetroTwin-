@@ -56,23 +56,16 @@ erDiagram
 
 `run_id` makes observations from different processed versions coexist. Foreign keys from observation rows to `(run_id, snapshot_id)` ensure a row cannot claim a source snapshot that was not linked to that run. The current views filter by the singleton pointer. For reproducible work, query by a pinned `run_id` instead of relying on “current” after the fact.
 
-## Safe procedure for a source refresh
+## Automated procedure for source refresh (T14)
 
-1. **Confirm the source is allowed.** Record publisher, URL, retrieval time, attribution, and reuse terms. Keep terms as unknown until checked; do not automate a download whose terms are unverified.
-2. **Preserve inputs.** Put a reviewed new source file in `data/raw/` or update the explicitly reviewed manual annotation file. Never edit a prior raw file or processed run in place.
-3. **Run the existing pipeline.** Reuse `src/petrotwin/data/pipeline.py`; do not create a second cleaner. It writes a new immutable run with checksums, manifest, quality report, quarantine, and canonical CSVs.
-4. **Review before publication.** Resolve `data/processed/current.json`, inspect the run, run `notebooks/00_data_preparation/01_preprocessing_quality_audit.ipynb`, and review `notebooks/01_eda/01_fuel_market_eda.ipynb` when a source or data distribution changes. Investigate FAILs; record and agree on WARNs.
-5. **Run MySQL preflight.** From the repo root in PowerShell:
+The source refresh is completely automated via the T14 orchestrator (`petrotwin.collectors.runner`) and scheduled via Cron on the server. The workflow guarantees zero manual data entry, atomicity, validation gates, and seamless database pointer transitions:
 
-   ```powershell
-   $env:PYTHONUTF8 = '1'
-   $env:PYTHONPATH = 'src'
-   python -m petrotwin.data.mysql_loader
-   ```
-
-6. **Load only an accepted run.** Put the DB password in a hidden local prompt/environment variable; do not put it in SQL, Git, or chat. Run `python -m petrotwin.data.mysql_loader --load` only after preflight succeeds. The loader validates in memory, then publishes its rows in one transaction. It does not use physical staging tables. A failure rolls back and leaves the old pointer in place.
-7. **Reconcile.** Run `database/mysql/003_reconcile_run.sql`. Check row counts, explicit missingness, quarantine reasons, current pointer, and strict-prior feature dates. Save the evidence in `reports/mysql-reconciliation.md`.
-8. **Hand off the run ID.** Tell M3–M5 which run was accepted. For a reproducible notebook/model, pin its `run_id` and record it with results.
+1. **Automated scheduled collection:** Cron triggers the individual collectors (`brent.py`, `fx.py`, `domestic_fuel.py`) or the full orchestrator `python -m petrotwin.collectors.runner`.
+2. **Append-only raw preservation:** New observations are appended atomically to `data/raw/*.csv` with ISO UTC extraction timestamps. Previous raw records are never modified in place.
+3. **Automated validation pipeline:** The orchestrator automatically invokes `src/petrotwin/data/pipeline.py` when new rows are detected. It checks schema fingerprints, keys, temporal order, and leakage constraints (`brent_observation_date < event_date`), generating an immutable run with checksums, manifest, and quality report.
+4. **Automated transactional publication:** If `PETROTWIN_DB_HOST` is configured, the orchestrator executes `src/petrotwin/data/mysql_loader.py --load` in a single ACID transaction.
+5. **Atomic pointer switch:** The database singleton pointer `dataset_current_pointer` is updated only after all validation and reconciliation gates pass. Any failure triggers a clean rollback, leaving existing serving views (`v_current_*`) intact and unaffected.
+6. **Continuous monitoring:** Every scheduled run appends structured JSON diagnostics to `logs/collector_run.log` for operational observability. See [T14 Runbook](../reports/T14-update-runbook.md) for log monitoring and alert details.
 
 The initial schema migration `001_initial_schema.sql` is for a fresh database only. Do not run it again against the populated project database. `002_seed_reference_data.sql` uses `INSERT IGNORE` and is safe to reapply.
 

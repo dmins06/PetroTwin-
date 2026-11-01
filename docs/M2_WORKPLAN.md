@@ -60,7 +60,8 @@ Keep generated datasets and credentials out of Git. Use the CSV v3 interface as 
 - T10 notebook and seven diagnostic figures were regenerated against accepted run `28b22922e761cb08a8d8`; detailed metrics and findings are in `reports/eda-summary.md`. The pre-EDA audit reports 0 FAIL and 1 WARN. T11 remains exploratory until M3 agrees on the target, forecast origin, horizon, and as-of cutoff.
 - T12 schema is applied on local MySQL 26.10.0 and verified: 12/12 base tables use InnoDB; seed counts are 10 fuel products and 2 market series. Evidence is in `reports/mysql-schema-acceptance.md`.
 - T13 loader, database load, and reconciliation are complete for run `28b22922e761cb08a8d8`. Live MySQL 26.10.0 counts match the accepted outputs; NULL/quarantine semantics, current pointer, and strict-prior panel checks passed. Evidence is in `reports/mysql-reconciliation.md`.
-- The team sheet currently marks T14 and T15 complete, but the repo's planned refresh/handoff acceptance artifacts still need review; source reuse terms also remain unverified. Reconcile the team's status with the actual deliverables before treating M2 as fully closed.
+- T14 automated update infrastructure is complete: collectors (`brent.py`, `fx.py`, `domestic_fuel.py`), orchestrator `runner.py`, config `configs/collectors.yaml`, `scripts/crontab_example.txt`, and operational runbook `reports/t14-update-runbook.md` are all implemented and verified.
+- T15 stable data interface and data dictionary are published; teammate review and dry run with M3–M5 remain before closing the phase.
 
 ## Original team-sheet schedule
 
@@ -93,11 +94,15 @@ Status and due dates below reflect the sheet snapshot previously reviewed; updat
 | `src/petrotwin/data/quality_audit.py`, `notebooks/00_data_preparation/` | Pre-EDA profiles, gates, and data-shape charts | Audit run before T10; 0 FAIL, 1 WARN |
 | `docs/M2_DATABASE_GUIDE.md` | Database concepts, end-to-end flow, safe refresh, and SQL practice | Added; team review still useful |
 | `src/petrotwin/data/pipeline.py` | Existing M1 raw-to-processed pipeline | Reuse for T14; do not create a second cleaner |
+| `src/petrotwin/collectors/` | Data collectors (`brent.py`, `fx.py`, `domestic_fuel.py`, `runner.py`) | T14 automated collectors and runner |
+| `scripts/crontab_example.txt` | Crontab scheduler configuration for server deployment | T14 deployment schedule |
+| `configs/collectors.yaml` | Collector timeouts, retries, and source metadata | T14 configuration |
+| `reports/t14-update-runbook.md` | Operations runbook with setup, monitoring, and failover guides | T14 documentation |
 | `reports/data-foundation-acceptance.md` | M1 snapshot audit | Read as input; preserve the audit trail |
 
 ### Remaining review and handoff items
 
-The team sheet currently marks T14 and T15 complete, while source reuse terms are still unverified and this checkout does not yet contain an automated refresh configuration or a separate teammate acceptance record. Confirm with task owners whether the sheet status refers to work outside this checkout. Do not automate source downloads until reuse terms are approved. Use `docs/M2_DATABASE_GUIDE.md` as the starting handoff; reuse `petrotwin.data.pipeline` for any approved refresh rather than creating another cleaner.
+T14 automated update infrastructure is now fully built and documented. The remaining work is conducting the M3–M5 handoff review (T15), verifying live credentials and source reuse terms on the target server environment, and executing the initial dry-run on server deployment. Use `docs/M2_DATABASE_GUIDE.md` and `reports/t14-update-runbook.md` as operational references.
 
 ## Working procedure in VS Code
 

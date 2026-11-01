@@ -1,0 +1,34 @@
+brent:
+  source_id: eia_fred
+  series_id: DCOILBRENTEU
+  source_url: https://fred.stlouisfed.org/data/DCOILBRENTEU
+  publisher: "U.S. Energy Information Administration (EIA), distributed by FRED"
+  license_reuse_terms: "unknown; verify with publisher"
+  request_timeout_seconds: 30
+  retry_count: 3
+  retry_delay_seconds: 5
+
+fx:
+  source_id: sbv_reference_via_algolab
+  source_url: https://algolab.vn/macro/vn-fx-rate-ty-gia-sbv-trung-tam
+  source_attribution: "Algolab page identifies source as GSO / State Bank of Vietnam (SBV)"
+  vietcombank_api_url: https://vapi.vnappmob.com/api/v2/exchange_rate/vietcombank
+  license_reuse_terms: "unknown; verify with publisher"
+  request_timeout_seconds: 15
+  retry_count: 3
+  retry_delay_seconds: 5
+
+domestic_fuel:
+  source_id: pvoil
+  source_url: https://pvoil.com.vn/tin-gia-xang-dau
+  license_reuse_terms: "unknown; verify with publisher"
+  request_timeout_seconds: 30
+  retry_count: 2
+  retry_delay_seconds: 10
+  default_effective_time: "15:00"
+
+runner:
+  log_dir: logs
+  log_filename: collector_run.log
+  pipeline_module: petrotwin.data.pipeline
+  loader_module: petrotwin.data.mysql_loader

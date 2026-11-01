@@ -12,7 +12,7 @@ The accepted snapshot at the 2026-10-23 audit is `28b22922e761cb08a8d8`: 2,128 B
 - Source audit: `fuel_price_observation.csv` and `market_observation.csv` retain source-specific grain and provenance.
 - Missing market features and unverified fund annotations are NULL. Confirmed fund spending is `1`; confirmed no-spending is `0`.
 - Feature joins use only market observation dates strictly before each fuel event's local calendar date. Preserve the observation date, age, and snapshot identifiers with any extracted feature set.
-- The pipeline consumes local source snapshots and currently does not fetch new source data from the internet. Rebuild through the documented runner when raw snapshots or manual annotations are intentionally updated.
+- The automated data pipeline periodically collects live observations via scheduled collectors (`petrotwin.collectors.runner`), validates data integrity and leakage constraints, and publishes new immutable runs and database views automatically.
 
 ## How consumers find a dataset
 
