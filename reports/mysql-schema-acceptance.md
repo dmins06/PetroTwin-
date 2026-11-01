@@ -12,6 +12,6 @@
 
 The observed table set is `dataset_current_pointer`, `dataset_run`, `dataset_run_source`, `fuel_market_panel`, `fuel_price_observation`, `fuel_product`, `fund_annotation`, `market_observation`, `market_series`, `quality_report`, `quarantine_record`, and `source_snapshot`.
 
-## Scope and next work
+## Related T13 evidence
 
-This verifies the T12 schema and reference seeds on the installed server. T13 is still pending: load the accepted run idempotently, reconcile row counts and keys to its manifest, retain NULL and quarantine semantics, and ensure a failed load cannot advance the current-run pointer. Use a development database and keep credentials outside SQL files and Git.
+T13 is complete for accepted run `28b22922e761cb08a8d8`. The loader published and reconciled 1,390 fuel-price observations, 4,528 market observations, 1,390 panel rows, 565 fund annotations, and 64 quarantine records. Full reconciliation results and data-quality checks are documented in `reports/mysql-reconciliation.md`.
