@@ -1,0 +1,93 @@
+# PetroTwin – Crontab Example for T14 Automated Data Update
+# =============================================================
+# All times shown as:  ICT (UTC+7)  →  UTC equivalent
+#
+# Requirements:
+#   • Ubuntu/Debian server with Python 3.11+
+#   • The petrotwin package installed in the Python environment used below
+#   • Environment variables stored in /etc/petrotwin/env (see "Setup" below)
+#
+# =============================================================
+# SETUP ON UBUNTU / DEBIAN SERVER
+# =============================================================
+#
+# 1. Create the env file (do NOT commit this file to version control):
+#
+#       sudo mkdir -p /etc/petrotwin
+#       sudo tee /etc/petrotwin/env > /dev/null <<'EOF'
+#       FRED_API_KEY=your_fred_api_key_here
+#       PETROTWIN_DB_HOST=your_db_host
+#       PETROTWIN_DB_USER=petrotwin
+#       PETROTWIN_DB_PASSWORD=your_db_password
+#       PETROTWIN_DB_NAME=petrotwin
+#       EOF
+#       sudo chmod 600 /etc/petrotwin/env
+#
+# 2. Open the crontab editor for the service user (e.g. "petrotwin"):
+#
+#       sudo -u petrotwin crontab -e
+#
+# 3. Paste the lines below (edit PYTHON and PROJECT_DIR to match your server):
+#
+# =============================================================
+
+# --- Variables (edit to match your installation) -------------------------
+PYTHON=/home/petrotwin/.venv/bin/python
+PROJECT_DIR=/home/petrotwin/PetroTwin-
+LOG_DIR=/home/petrotwin/PetroTwin-/logs
+
+# Load secrets for all jobs
+BASH_ENV=/etc/petrotwin/env
+SHELL=/bin/bash
+
+# =========================================================================
+# JOB 1 — Brent Crude (FRED / EIA)
+#   Daily at 06:00 ICT = 23:00 UTC (previous calendar day)
+#   FRED publishes trading-day data with a 1-day lag; fetching at 06:00 ICT
+#   ensures yesterday's observation is available.
+# =========================================================================
+0 23 * * * . /etc/petrotwin/env && cd /home/petrotwin/PetroTwin- && /home/petrotwin/.venv/bin/python -m petrotwin.collectors.brent >> /home/petrotwin/PetroTwin-/logs/brent.log 2>&1
+
+# =========================================================================
+# JOB 2 — USD/VND FX Rate (SBV via Vietcombank)
+#   Weekdays at 09:30 ICT = 02:30 UTC
+#   SBV publishes the central reference rate each working morning.
+#   The collector skips weekends automatically, but the cron also restricts
+#   to Mon–Fri (fields 5 = 1-5) for efficiency.
+# =========================================================================
+30 2 * * 1-5 . /etc/petrotwin/env && cd /home/petrotwin/PetroTwin- && /home/petrotwin/.venv/bin/python -m petrotwin.collectors.fx >> /home/petrotwin/PetroTwin-/logs/fx.log 2>&1
+
+# =========================================================================
+# JOB 3a–3f — Domestic Fuel Price Polling (PVOIL)
+#   MOIT/PVOIL announce revised prices on Thursdays at ~15:00 ICT.
+#   Poll every 5 minutes from 15:05–15:30 ICT = 08:05–08:30 UTC (Thursday).
+#   The collector is idempotent: once a new date is written it stops adding.
+# =========================================================================
+5  8 * * 4 . /etc/petrotwin/env && cd /home/petrotwin/PetroTwin- && /home/petrotwin/.venv/bin/python -m petrotwin.collectors.domestic_fuel >> /home/petrotwin/PetroTwin-/logs/domestic_fuel.log 2>&1
+10 8 * * 4 . /etc/petrotwin/env && cd /home/petrotwin/PetroTwin- && /home/petrotwin/.venv/bin/python -m petrotwin.collectors.domestic_fuel >> /home/petrotwin/PetroTwin-/logs/domestic_fuel.log 2>&1
+15 8 * * 4 . /etc/petrotwin/env && cd /home/petrotwin/PetroTwin- && /home/petrotwin/.venv/bin/python -m petrotwin.collectors.domestic_fuel >> /home/petrotwin/PetroTwin-/logs/domestic_fuel.log 2>&1
+20 8 * * 4 . /etc/petrotwin/env && cd /home/petrotwin/PetroTwin- && /home/petrotwin/.venv/bin/python -m petrotwin.collectors.domestic_fuel >> /home/petrotwin/PetroTwin-/logs/domestic_fuel.log 2>&1
+25 8 * * 4 . /etc/petrotwin/env && cd /home/petrotwin/PetroTwin- && /home/petrotwin/.venv/bin/python -m petrotwin.collectors.domestic_fuel >> /home/petrotwin/PetroTwin-/logs/domestic_fuel.log 2>&1
+30 8 * * 4 . /etc/petrotwin/env && cd /home/petrotwin/PetroTwin- && /home/petrotwin/.venv/bin/python -m petrotwin.collectors.domestic_fuel >> /home/petrotwin/PetroTwin-/logs/domestic_fuel.log 2>&1
+
+# =========================================================================
+# JOB 4 — Full Runner (all 3 collectors + pipeline + DB loader)
+#   Daily at 10:00 ICT = 03:00 UTC
+#   Runs all collectors first, then the pipeline, then the DB loader
+#   (loader only executes if PETROTWIN_DB_HOST is set in the env file).
+#   This job is the "safety net" that ensures the full pipeline runs
+#   even if individual collector jobs failed or were skipped.
+# =========================================================================
+0 3 * * * . /etc/petrotwin/env && cd /home/petrotwin/PetroTwin- && /home/petrotwin/.venv/bin/python -m petrotwin.collectors.runner >> /home/petrotwin/PetroTwin-/logs/runner.log 2>&1
+
+# =========================================================================
+# LOG ROTATION (optional — add to /etc/logrotate.d/petrotwin)
+# =========================================================================
+# /home/petrotwin/PetroTwin-/logs/*.log {
+#     daily
+#     rotate 30
+#     compress
+#     missingok
+#     notifempty
+#     create 640 petrotwin petrotwin
+# }
