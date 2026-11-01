@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Sequence
 
 import requests
+import yaml
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -81,14 +82,25 @@ def _utcnow_iso() -> str:
 
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[4]
+    return Path(__file__).resolve().parents[3]
 
 
 def _raw_dir() -> Path:
     override = os.environ.get("PETROTWIN_DATA_DIR")
     if override:
-        return Path(override)
+        path = Path(override).expanduser()
+        return path if path.is_absolute() else (_repo_root() / path).resolve()
     return _repo_root() / "data" / "raw"
+
+
+def _request_timeout() -> float:
+    config_path = _repo_root() / "configs" / "collectors.yaml"
+    try:
+        with config_path.open(encoding="utf-8") as stream:
+            settings = (yaml.safe_load(stream) or {}).get("fx", {})
+        return max(1.0, float(settings.get("request_timeout_seconds", REQUEST_TIMEOUT)))
+    except (AttributeError, OSError, TypeError, ValueError, yaml.YAMLError):
+        return REQUEST_TIMEOUT
 
 
 def _csv_path() -> Path:
@@ -145,7 +157,7 @@ def _fetch_vietcombank_api() -> int:
         requests.RequestException: on HTTP/network error.
     """
     _log("fetch_start", method="vietcombank_api", url=VIETCOMBANK_API_URL)
-    resp = requests.get(VIETCOMBANK_API_URL, timeout=REQUEST_TIMEOUT)
+    resp = requests.get(VIETCOMBANK_API_URL, timeout=_request_timeout())
     resp.raise_for_status()
     payload = resp.json()
 
@@ -172,7 +184,7 @@ def _fetch_vcb_fallback() -> int:
     import xml.etree.ElementTree as ET
 
     _log("fetch_start", method="vcb_xml_fallback", url=VCB_FALLBACK_URL)
-    resp = requests.get(VCB_FALLBACK_URL, timeout=REQUEST_TIMEOUT)
+    resp = requests.get(VCB_FALLBACK_URL, timeout=_request_timeout())
     resp.raise_for_status()
 
     root = ET.fromstring(resp.text)
@@ -210,6 +222,7 @@ def _fetch_rate() -> int:
 
 def _append_to_csv(path: Path, rows: Sequence[dict[str, str]]) -> None:
     """Atomically append *rows* to *path*."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path_str = tempfile.mkstemp(
         dir=path.parent, prefix=path.stem + "_tmp_", suffix=".csv"
     )
