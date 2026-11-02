@@ -25,8 +25,11 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+import yaml
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -38,7 +41,7 @@ def _utcnow_iso() -> str:
 
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[4]
+    return Path(__file__).resolve().parents[3]
 
 
 def _log_dir() -> Path:
@@ -58,31 +61,53 @@ def _print(msg: str) -> None:
 # Individual collector calls
 # ---------------------------------------------------------------------------
 
-def _run_collector(module: str) -> tuple[int, str | None]:
+def _run_collector(
+    module: str,
+    retry_count: int = 0,
+    retry_delay_seconds: float = 0,
+) -> tuple[int, str | None]:
     """Run a collector module as a subprocess.
 
     Returns:
         (new_rows, error_message)  — new_rows is -1 on failure.
     """
-    _print(f"starting {module}")
-    result = subprocess.run(
-        [sys.executable, "-m", module],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
+    result = None
+    for attempt in range(retry_count + 1):
+        _print(f"starting {module} attempt={attempt + 1}/{retry_count + 1}")
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", module],
+                cwd=_repo_root(),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            err = f"{module} could not start: {exc}"
+            _print(f"error: {err}")
+            if attempt < retry_count:
+                time.sleep(retry_delay_seconds)
+                continue
+            return -1, err
 
-    # Echo subprocess output to stdout
-    if result.stdout.strip():
-        for line in result.stdout.splitlines():
-            print(line, flush=True)
-    if result.stderr.strip():
-        for line in result.stderr.splitlines():
-            print(line, flush=True)
+        # Echo output from every attempt so the retry history remains visible.
+        if result.stdout.strip():
+            for line in result.stdout.splitlines():
+                print(line, flush=True)
+        if result.stderr.strip():
+            for line in result.stderr.splitlines():
+                print(line, flush=True)
 
-    if result.returncode != 0:
+        if result.returncode == 0:
+            break
         err = f"{module} exited with code {result.returncode}"
         _print(f"error: {err}")
+        if attempt < retry_count:
+            time.sleep(retry_delay_seconds)
+    else:
+        return -1, err
+
+    if result is None or result.returncode != 0:
         return -1, err
 
     # Try to parse "new_rows" from the last JSON log line of stdout
@@ -110,8 +135,12 @@ def _run_collector(module: str) -> tuple[int, str | None]:
 def _run_pipeline() -> tuple[str, str | None]:
     """Run petrotwin.data.pipeline.  Returns (status, error)."""
     _print("starting pipeline")
+    raw_dir = Path(os.environ.get("PETROTWIN_DATA_DIR", str(_repo_root() / "data" / "raw")))
+    if not raw_dir.is_absolute():
+        raw_dir = (_repo_root() / raw_dir).resolve()
     result = subprocess.run(
-        [sys.executable, "-m", "petrotwin.data.pipeline"],
+        [sys.executable, "-m", "petrotwin.data.pipeline", "--raw-dir", str(raw_dir)],
+        cwd=_repo_root(),
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -137,6 +166,7 @@ def _run_loader() -> tuple[str, str | None]:
     _print("starting mysql_loader")
     result = subprocess.run(
         [sys.executable, "-m", "petrotwin.data.mysql_loader", "--load"],
+        cwd=_repo_root(),
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -180,17 +210,36 @@ def main() -> None:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Run fetchers only; skip pipeline and loader.",
+        help="Run collectors and write raw CSVs, then skip pipeline and loader.",
     )
     args = parser.parse_args()
 
     run_at = _utcnow_iso()
     _print(f"runner_start dry_run={args.dry_run}")
 
+    # Collector retry settings live in the same checked-in config as the
+    # source IDs and timeout values; retries are safe because each collector
+    # checks whether its records already exist before appending.
+    config_path = _repo_root() / "configs" / "collectors.yaml"
+    try:
+        with config_path.open(encoding="utf-8") as stream:
+            collector_config = yaml.safe_load(stream) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        _print(f"config_error path={config_path} error={exc}")
+        sys.exit(2)
+
+    def run_configured(module: str, section: str) -> tuple[int, str | None]:
+        settings = collector_config.get(section, {})
+        return _run_collector(
+            module,
+            retry_count=max(0, int(settings.get("retry_count", 0))),
+            retry_delay_seconds=max(0.0, float(settings.get("retry_delay_seconds", 0))),
+        )
+
     # ---- Collectors --------------------------------------------------------
-    brent_rows, brent_err = _run_collector("petrotwin.collectors.brent")
-    fx_rows, fx_err = _run_collector("petrotwin.collectors.fx")
-    fuel_rows, fuel_err = _run_collector("petrotwin.collectors.domestic_fuel")
+    brent_rows, brent_err = run_configured("petrotwin.collectors.brent", "brent")
+    fx_rows, fx_err = run_configured("petrotwin.collectors.fx", "fx")
+    fuel_rows, fuel_err = run_configured("petrotwin.collectors.domestic_fuel", "domestic_fuel")
 
     any_collector_failed = any(
         rows == -1 for rows in [brent_rows, fx_rows, fuel_rows]

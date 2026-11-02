@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Sequence
 
 import requests
+import yaml
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -84,15 +85,26 @@ def _utcnow_iso() -> str:
 
 
 def _repo_root() -> Path:
-    """Return project root (two levels above ``src/``)."""
-    return Path(__file__).resolve().parents[4]
+    """Return the repository root containing ``src/`` and ``data/``."""
+    return Path(__file__).resolve().parents[3]
 
 
 def _raw_dir() -> Path:
     override = os.environ.get("PETROTWIN_DATA_DIR")
     if override:
-        return Path(override)
+        path = Path(override).expanduser()
+        return path if path.is_absolute() else (_repo_root() / path).resolve()
     return _repo_root() / "data" / "raw"
+
+
+def _request_timeout() -> float:
+    config_path = _repo_root() / "configs" / "collectors.yaml"
+    try:
+        with config_path.open(encoding="utf-8") as stream:
+            settings = (yaml.safe_load(stream) or {}).get("brent", {})
+        return max(1.0, float(settings.get("request_timeout_seconds", REQUEST_TIMEOUT)))
+    except (AttributeError, OSError, TypeError, ValueError, yaml.YAMLError):
+        return REQUEST_TIMEOUT
 
 
 def _csv_path() -> Path:
@@ -142,7 +154,7 @@ def _parse_text_response(text: str, since: date | None) -> list[dict[str, str]]:
 def _fetch_via_text(since: date | None) -> list[dict[str, str]]:
     """Download plain-text file from FRED (no API key required)."""
     _log("fetch_start", method="text_file", url=FRED_TEXT_URL)
-    resp = requests.get(FRED_TEXT_URL, timeout=REQUEST_TIMEOUT)
+    resp = requests.get(FRED_TEXT_URL, timeout=_request_timeout())
     resp.raise_for_status()
     rows = _parse_text_response(resp.text, since)
     _log("fetch_done", method="text_file", raw_rows=len(rows))
@@ -163,7 +175,7 @@ def _fetch_via_api(api_key: str, since: date | None) -> list[dict[str, str]]:
     params["vintage_dates"] = date.today().isoformat()
 
     _log("fetch_start", method="api", observation_start=params.get("observation_start"))
-    resp = requests.get(FRED_JSON_URL, params=params, timeout=REQUEST_TIMEOUT)
+    resp = requests.get(FRED_JSON_URL, params=params, timeout=_request_timeout())
     resp.raise_for_status()
     payload = resp.json()
 
@@ -220,6 +232,7 @@ def _build_csv_rows(
 
 def _append_to_csv(path: Path, rows: Sequence[dict[str, str]]) -> None:
     """Atomically append *rows* to *path*, preserving existing content."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     # Write to a sibling temp file, then rename (atomic on POSIX)
     fd, tmp_path_str = tempfile.mkstemp(
         dir=path.parent, prefix=path.stem + "_tmp_", suffix=".csv"

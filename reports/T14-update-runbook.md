@@ -71,6 +71,9 @@ PETROTWIN_DATA_DIR=/custom/path/data/raw   # mặc định: <project_root>/data/
 > [!IMPORTANT]
 > Nếu `PETROTWIN_DB_HOST` **không được set**, bước `mysql_loader` sẽ bị **bỏ qua tự động** (status = `no_db_config`). Đây không phải lỗi.
 
+> [!IMPORTANT]
+> Tùy chọn `--dry-run` chỉ bỏ qua pipeline và database loader; ba collector vẫn gọi nguồn và ghi hàng mới vào `data/raw/*.csv`. Không dùng tùy chọn này nếu muốn thử mà không thay đổi CSV.
+
 > [!CAUTION]
 > **Không commit** file `/etc/petrotwin/env` vào git. File này chứa credentials nhạy cảm.
 
@@ -350,8 +353,8 @@ tail -1 logs/collector_run.log | python3 -m json.tool
 ### 6.4 Kiểm tra run folder pipeline được tạo
 
 ```bash
-# Pipeline tạo run folder trong data/runs/ (immutable, timestamped)
-ls -lt data/runs/ | head -5
+# Pipeline tạo run folder trong data/processed/runs/ (immutable, content-addressed)
+ls -lt data/processed/runs/ | head -5
 ```
 
 ---
@@ -386,7 +389,7 @@ PetroTwin-/
 │   ├── brent_crude_prices.csv       # Append-only (Brent)
 │   ├── usd_vnd_rates.csv            # Append-only (FX)
 │   └── data_price_petro.csv         # Append-only (Fuel)
-├── data/runs/                       # Immutable pipeline run folders
+├── data/processed/runs/              # Immutable, content-addressed pipeline runs
 ├── logs/
 │   ├── collector_run.log            # Structured JSON log (runner)
 │   ├── brent.log                    # Stdout từ cron job Brent
