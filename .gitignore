@@ -34,3 +34,4 @@ logs/**
 
 # Generated report assets
 reports/figures/generated/**
+*.log
