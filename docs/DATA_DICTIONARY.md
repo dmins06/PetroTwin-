@@ -138,4 +138,4 @@ Run these checks before publishing processed data:
 
 ## Current source assessment and unresolved decisions
 
-The current files report Brent as EIA data distributed by FRED, FX as SBV central reference rates attributed through Algolab, and domestic prices from PVOIL. The PVOIL page was not independently retrievable during the initial audit, and the FX file uses a secondary source. Record these source confidence limits in the manifest; verify source licenses and confirm zero-price FO semantics before declaring the processed snapshot production-ready.
+The current files report Brent as EIA data distributed by FRED, FX as Algolab-attributed values whose SBV central-reference status remains unverified, and domestic prices from PVOIL. The PVOIL page was not independently retrievable during the initial audit. Record these source confidence limits in the manifest and verify source licenses before declaring the processed snapshot production-ready.

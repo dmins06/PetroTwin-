@@ -74,3 +74,5 @@ The run directory contains:
 | `gasoline_ron95_iv` | Xăng RON 95-IV |
 
 Product labels are not interchangeable. Do not fill a missing grade from another grade. `fuel_oil_3s` currently has no valid published target rows because all its source prices are zero and quarantined.
+
+- Source provenance: live SBV central reference-rate collection is currently disabled in a fail-closed state because no official source and response contract are verified. Historical Algolab-attributed FX rows remain historical data only and must not be represented as independently verified SBV observations; a commercial-bank transfer rate is never a substitution.
