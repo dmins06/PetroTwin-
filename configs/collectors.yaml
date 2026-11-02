@@ -9,11 +9,12 @@ brent:
   retry_delay_seconds: 5
 
 fx:
-  source_id: sbv_reference_via_algolab
-  source_url: https://algolab.vn/macro/vn-fx-rate-ty-gia-sbv-trung-tam
-  source_attribution: "Algolab page identifies source as GSO / State Bank of Vietnam (SBV)"
-  vietcombank_api_url: https://vapi.vnappmob.com/api/v2/exchange_rate/vietcombank
-  license_reuse_terms: "unknown; verify with publisher"
+  source_id: sbv_reference_unverified
+  source_status: unavailable
+  source_url: null
+  source_attribution: "No SBV central reference-rate source has been verified"
+  rate_type: "SBV central reference rate"
+  license_reuse_terms: "unknown; verify with publisher before collection"
   request_timeout_seconds: 15
   retry_count: 3
   retry_delay_seconds: 5

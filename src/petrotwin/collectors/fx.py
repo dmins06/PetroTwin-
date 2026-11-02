@@ -1,12 +1,8 @@
-"""Collector: USD/VND exchange rate from Vietcombank (SBV central reference).
+"""Collector for the USD/VND State Bank of Vietnam central reference rate.
 
-Fetches the current USD/VND transfer rate from Vietcombank's public API
-(which reflects the State Bank of Vietnam central reference rate) and appends
-it to ``data/raw/usd_vnd_rates.csv``.
-
-The SBV rate is published once per working day.  This script is idempotent:
-if today's date is already present in the CSV it exits cleanly without writing
-anything.  It also skips weekends.
+The collector is fail-closed until an official, documented SBV source and
+response schema are configured and verified.  It deliberately does not use
+commercial-bank rates or commercial-bank endpoints as substitutes.
 
 Usage::
 
@@ -24,6 +20,7 @@ import logging
 import os
 import sys
 import tempfile
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Sequence
@@ -39,12 +36,6 @@ BASE_CURRENCY = "USD"
 QUOTE_CURRENCY = "VND"
 UNIT = "VND per 1 USD"
 RATE_TYPE = "SBV central reference rate"
-SOURCE_URL = "https://algolab.vn/macro/vn-fx-rate-ty-gia-sbv-trung-tam"
-SOURCE_ATTRIBUTION = "Algolab page identifies source as GSO / State Bank of Vietnam (SBV)"
-
-VIETCOMBANK_API_URL = "https://vapi.vnappmob.com/api/v2/exchange_rate/vietcombank"
-VCB_FALLBACK_URL = "https://portal.vietcombank.com.vn/UserControls/TVPortal.TyGia/pXML.aspx?b=10"
-
 REQUEST_TIMEOUT = 15
 
 COLUMNS: list[str] = [
@@ -59,6 +50,15 @@ COLUMNS: list[str] = [
     "source_value",
     "extracted_at_utc",
 ]
+
+
+class FXSourceUnavailableError(RuntimeError):
+    """Raised when no verified SBV central-rate source is configured."""
+
+
+class FXSourceSchemaError(ValueError):
+    """Raised when a verified source response does not match the strict schema."""
+
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -146,74 +146,99 @@ def _format_source_value(rate: int) -> str:
 # Fetching
 # ---------------------------------------------------------------------------
 
-def _fetch_vietcombank_api() -> int:
-    """Fetch USD transfer rate from Vietcombank vnappmob API.
 
-    Returns:
-        Rate as integer VND per 1 USD.
-
-    Raises:
-        ValueError: if the USD row or transfer field is not found.
-        requests.RequestException: on HTTP/network error.
-    """
-    _log("fetch_start", method="vietcombank_api", url=VIETCOMBANK_API_URL)
-    resp = requests.get(VIETCOMBANK_API_URL, timeout=_request_timeout())
-    resp.raise_for_status()
-    payload = resp.json()
-
-    results = payload.get("results", [])
-    for item in results:
-        if str(item.get("currency", "")).strip().upper() == "USD":
-            transfer_raw = item.get("transfer", "")
-            if not transfer_raw:
-                raise ValueError("USD 'transfer' field is empty in Vietcombank API response")
-            # Strip commas/spaces and convert
-            rate = int(float(str(transfer_raw).replace(",", "").replace(" ", "")))
-            _log("fetch_done", method="vietcombank_api", rate=rate)
-            return rate
-
-    raise ValueError("USD entry not found in Vietcombank API response")
-
-
-def _fetch_vcb_fallback() -> int:
-    """Fallback: parse Vietcombank XML portal for USD rate.
-
-    Returns:
-        Rate as integer VND per 1 USD.
-    """
-    import xml.etree.ElementTree as ET
-
-    _log("fetch_start", method="vcb_xml_fallback", url=VCB_FALLBACK_URL)
-    resp = requests.get(VCB_FALLBACK_URL, timeout=_request_timeout())
-    resp.raise_for_status()
-
-    root = ET.fromstring(resp.text)
-    for exrate in root.iter("Exrate"):
-        if exrate.get("CurrencyCode", "").strip().upper() == "USD":
-            transfer_raw = exrate.get("Transfer", "")
-            if not transfer_raw:
-                raise ValueError("USD Transfer attribute is empty in VCB XML fallback")
-            rate = int(float(str(transfer_raw).replace(",", "").replace(" ", "")))
-            _log("fetch_done", method="vcb_xml_fallback", rate=rate)
-            return rate
-
-    raise ValueError("USD entry not found in Vietcombank XML fallback")
-
-
-def _fetch_rate() -> int:
-    """Try primary API, then fallback. Raises on both failures."""
+def _fx_config() -> dict[str, object]:
+    config_path = _repo_root() / "configs" / "collectors.yaml"
     try:
-        return _fetch_vietcombank_api()
-    except Exception as primary_exc:
-        _log("fetch_primary_failed", error=str(primary_exc))
-        _log("fetch_trying_fallback")
+        with config_path.open(encoding="utf-8") as stream:
+            config = yaml.safe_load(stream) or {}
+        settings = config.get("fx")
+        if not isinstance(settings, dict):
+            raise FXSourceUnavailableError("FX source configuration is missing the 'fx' section")
+        return settings
+    except FXSourceUnavailableError:
+        raise
+    except (OSError, TypeError, yaml.YAMLError) as exc:
+        raise FXSourceUnavailableError(f"Could not load FX source configuration: {exc}") from exc
+
+
+def _retry_settings() -> tuple[int, float]:
+    settings = _fx_config()
+    try:
+        retry_count = max(0, int(settings.get("retry_count", 0)))
+        retry_delay = max(0.0, float(settings.get("retry_delay_seconds", 0)))
+    except (TypeError, ValueError) as exc:
+        raise FXSourceUnavailableError(f"Invalid FX retry configuration: {exc}") from exc
+    return retry_count, retry_delay
+
+
+def _parse_verified_rate(payload: object, settings: dict[str, object]) -> tuple[int, date]:
+    if not isinstance(payload, dict):
+        raise FXSourceSchemaError("Verified FX response must be a JSON object")
+
+    required = {"observation_date", "rate_vnd_per_usd", "unit", "rate_type"}
+    missing = sorted(required - payload.keys())
+    if missing:
+        raise FXSourceSchemaError(f"Verified FX response missing fields: {', '.join(missing)}")
+    if payload.get("unit") != UNIT:
+        raise FXSourceSchemaError(f"Verified FX response unit must be {UNIT!r}")
+    if payload.get("rate_type") != RATE_TYPE:
+        raise FXSourceSchemaError("Verified FX response is not an SBV central reference rate")
+
+    try:
+        observation_date = date.fromisoformat(str(payload["observation_date"]))
+        rate_raw = str(payload["rate_vnd_per_usd"]).replace(",", "").strip()
+        rate_decimal = float(rate_raw)
+        if not rate_decimal.is_integer() or rate_decimal <= 0:
+            raise ValueError
+        rate = int(rate_decimal)
+    except (TypeError, ValueError) as exc:
+        raise FXSourceSchemaError("Verified FX response has an invalid date or rate") from exc
+
+    if observation_date > date.today():
+        raise FXSourceSchemaError("Verified FX observation date is in the future")
+    return rate, observation_date
+
+
+def _fetch_rate() -> tuple[int, date]:
+    settings = _fx_config()
+    if settings.get("source_status") != "verified":
+        raise FXSourceUnavailableError(
+            "No verified SBV central reference-rate source is configured; "
+            "commercial-bank or secondary-page rates will not be used"
+        )
+
+    source_url = str(settings.get("source_url", "")).strip()
+    if not source_url.startswith("https://"):
+        raise FXSourceUnavailableError("Verified FX source_url must be an HTTPS URL")
+
+    _log("fetch_start", url=source_url, source_status="verified")
+    response = requests.get(source_url, timeout=_request_timeout())
+    response.raise_for_status()
+    try:
+        payload = response.json()
+    except (requests.JSONDecodeError, ValueError) as exc:
+        raise FXSourceSchemaError("Verified FX response is not valid JSON") from exc
+    rate, observation_date = _parse_verified_rate(payload, settings)
+    _log("fetch_done", date=observation_date.isoformat(), rate=rate)
+    return rate, observation_date
+
+
+def _fetch_with_retries() -> tuple[int, date]:
+    retry_count, retry_delay = _retry_settings()
+    for attempt in range(retry_count + 1):
         try:
-            return _fetch_vcb_fallback()
-        except Exception as fallback_exc:
-            _log("fetch_fallback_failed", error=str(fallback_exc))
-            raise RuntimeError(
-                f"Both primary ({primary_exc}) and fallback ({fallback_exc}) fetch attempts failed"
-            ) from fallback_exc
+            return _fetch_rate()
+        except FXSourceUnavailableError:
+            raise
+        except FXSourceSchemaError:
+            raise
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            _log("fetch_retryable_error", attempt=attempt + 1, error=str(exc))
+            if attempt >= retry_count:
+                raise
+            time.sleep(retry_delay)
+    raise FXSourceUnavailableError("FX source fetch exhausted without a result")
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +301,7 @@ def run() -> int:
     extracted_at = _utcnow_iso()
 
     try:
-        rate = _fetch_rate()
+        rate, observation_date = _fetch_with_retries()
     except requests.HTTPError as exc:
         _log(
             "fetch_error",
@@ -284,19 +309,25 @@ def run() -> int:
             status_code=exc.response.status_code if exc.response is not None else None,
         )
         sys.exit(1)
-    except Exception as exc:
+    except (FXSourceUnavailableError, FXSourceSchemaError, requests.RequestException) as exc:
         _log("fetch_error", error=str(exc))
         sys.exit(1)
 
+    csv_path = _csv_path()
+    if _date_exists_in_csv(csv_path, observation_date):
+        _log("up_to_date", date=observation_date.isoformat())
+        return 0
+
+    settings = _fx_config()
     row: dict[str, str] = {
-        "date": today.isoformat(),
+        "date": observation_date.isoformat(),
         "base_currency": BASE_CURRENCY,
         "quote_currency": QUOTE_CURRENCY,
         "rate_vnd_per_usd": str(rate),
         "unit": UNIT,
         "rate_type": RATE_TYPE,
-        "source_url": SOURCE_URL,
-        "source_attribution": SOURCE_ATTRIBUTION,
+        "source_url": str(settings["source_url"]),
+        "source_attribution": str(settings["source_attribution"]),
         "source_value": _format_source_value(rate),
         "extracted_at_utc": extracted_at,
     }
