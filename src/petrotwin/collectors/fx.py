@@ -1,8 +1,7 @@
-"""Collector for the USD/VND State Bank of Vietnam central reference rate.
+"""Collector for a verified USD/VND SBV central reference rate.
 
-The collector is fail-closed until an official, documented SBV source and
-response schema are configured and verified.  It deliberately does not use
-commercial-bank rates or commercial-bank endpoints as substitutes.
+Collection is fail-closed while the official source remains unavailable.
+Commercial-bank rates are never used as an SBV substitute.
 
 Usage::
 
@@ -21,19 +20,26 @@ import os
 import sys
 import tempfile
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Sequence
 
 import requests
 import yaml
+from bs4 import BeautifulSoup
+import re
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 BASE_CURRENCY = "USD"
-QUOTE_CURRENCY = "VND"
+SOURCE_ID = "algolab_sbv_central_rate"
+SOURCE_NAME = "Algolab"
+UPSTREAM_SOURCE = "State Bank of Vietnam"
+PROVENANCE_STATUS = "provider_declared"
+ALGOAB_URL = "https://algolab.vn/macro/vn-fx-rate-ty-gia-sbv-trung-tam"
+
 UNIT = "VND per 1 USD"
 RATE_TYPE = "SBV central reference rate"
 REQUEST_TIMEOUT = 15
@@ -53,11 +59,17 @@ COLUMNS: list[str] = [
 
 
 class FXSourceUnavailableError(RuntimeError):
-    """Raised when no verified SBV central-rate source is configured."""
+    """No verified official source is currently configured."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
 
 
 class FXSourceSchemaError(ValueError):
-    """Raised when a verified source response does not match the strict schema."""
+    """Verified-source response did not match the required schema."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
 
 
 # ---------------------------------------------------------------------------
@@ -165,17 +177,16 @@ def _fx_config() -> dict[str, object]:
 def _retry_settings() -> tuple[int, float]:
     settings = _fx_config()
     try:
-        retry_count = max(0, int(settings.get("retry_count", 0)))
-        retry_delay = max(0.0, float(settings.get("retry_delay_seconds", 0)))
+        return max(0, int(settings.get("retry_count", 0))), max(
+            0.0, float(settings.get("retry_delay_seconds", 0))
+        )
     except (TypeError, ValueError) as exc:
         raise FXSourceUnavailableError(f"Invalid FX retry configuration: {exc}") from exc
-    return retry_count, retry_delay
 
 
-def _parse_verified_rate(payload: object, settings: dict[str, object]) -> tuple[int, date]:
+def _parse_verified_rate(payload: object) -> tuple[int, date]:
     if not isinstance(payload, dict):
         raise FXSourceSchemaError("Verified FX response must be a JSON object")
-
     required = {"observation_date", "rate_vnd_per_usd", "unit", "rate_type"}
     missing = sorted(required - payload.keys())
     if missing:
@@ -184,43 +195,85 @@ def _parse_verified_rate(payload: object, settings: dict[str, object]) -> tuple[
         raise FXSourceSchemaError(f"Verified FX response unit must be {UNIT!r}")
     if payload.get("rate_type") != RATE_TYPE:
         raise FXSourceSchemaError("Verified FX response is not an SBV central reference rate")
-
     try:
         observation_date = date.fromisoformat(str(payload["observation_date"]))
-        rate_raw = str(payload["rate_vnd_per_usd"]).replace(",", "").strip()
-        rate_decimal = float(rate_raw)
+        rate_decimal = float(str(payload["rate_vnd_per_usd"]).replace(",", "").strip())
         if not rate_decimal.is_integer() or rate_decimal <= 0:
             raise ValueError
         rate = int(rate_decimal)
     except (TypeError, ValueError) as exc:
         raise FXSourceSchemaError("Verified FX response has an invalid date or rate") from exc
-
     if observation_date > date.today():
         raise FXSourceSchemaError("Verified FX observation date is in the future")
     return rate, observation_date
+
+
+def _validate_freshness(observation_date: date, max_age_days: int = 7) -> None:
+    age_days = (date.today() - observation_date).days
+    if age_days > max_age_days:
+        raise FXSourceSchemaError(f"Algolab central-rate observation is stale: {observation_date.isoformat()} is {age_days} days old")
+
+
+def _parse_algolab_html(html: str) -> tuple[int, date]:
+    if not isinstance(html, str) or not html.strip():
+        raise FXSourceSchemaError("Algolab HTML response is empty")
+
+    soup = BeautifulSoup(html, "html.parser")
+    visible_text = " ".join(soup.stripped_strings)
+    if re.search(r"Tỷ giá SBV trung tâm|T[ỷy] giá USD:.*SBV trung tâm", visible_text, re.IGNORECASE) is None:
+        raise FXSourceSchemaError("Algolab HTML structure changed: central-rate page heading not found")
+    if re.search(r"Nguồn\s*:\s*(?:GSO\s*/\s*)?SBV", visible_text, re.IGNORECASE) is None:
+        raise FXSourceSchemaError("Algolab HTML structure changed: SBV source declaration not found")
+
+    match = re.search(
+        r"(?:Mới nhất|Latest)\s*([\d][\d.,]*)\s*([0-3]\d/[0-1]\d/[0-9]{4})",
+        visible_text,
+        re.IGNORECASE,
+    )
+    if match is None:
+        raise FXSourceSchemaError("Algolab HTML changed: latest central-rate card not found")
+
+    raw_rate, raw_date = match.groups()
+    try:
+        observation_date = datetime.strptime(raw_date, "%d/%m/%Y").date()
+        rate_decimal = float(raw_rate.replace(".", "").replace(",", ""))
+    except (TypeError, ValueError) as exc:
+        raise FXSourceSchemaError("Algolab central-rate card contains invalid date or rate") from exc
+    if not rate_decimal.is_integer() or rate_decimal <= 0:
+        raise FXSourceSchemaError("Algolab central rate must be a positive integer")
+    if not 1_000 <= rate_decimal <= 100_000:
+        raise FXSourceSchemaError("Algolab central rate is outside the expected USD/VND range")
+    if observation_date > date.today():
+        raise FXSourceSchemaError("Algolab central-rate observation date is in the future")
+    return int(rate_decimal), observation_date
 
 
 def _fetch_rate() -> tuple[int, date]:
     settings = _fx_config()
     if settings.get("source_status") != "verified":
         raise FXSourceUnavailableError(
-            "No verified SBV central reference-rate source is configured; "
-            "commercial-bank or secondary-page rates will not be used"
+            "Algolab central-rate source is not verified in configuration; "
+            "commercial-bank rates will not be used"
         )
-
+    if settings.get("source_id") != SOURCE_ID:
+        raise FXSourceUnavailableError("FX source_id must be algolab_sbv_central_rate")
     source_url = str(settings.get("source_url", "")).strip()
-    if not source_url.startswith("https://"):
-        raise FXSourceUnavailableError("Verified FX source_url must be an HTTPS URL")
-
-    _log("fetch_start", url=source_url, source_status="verified")
-    response = requests.get(source_url, timeout=_request_timeout())
+    if source_url != ALGOAB_URL:
+        raise FXSourceUnavailableError("Unexpected Algolab FX source_url")
+    _log("fetch_start", url=source_url, provider=SOURCE_NAME, upstream=UPSTREAM_SOURCE)
+    response = requests.get(
+        source_url,
+        timeout=_request_timeout(),
+        headers={"Accept": "text/html", "User-Agent": "PetroTwin-data-collector/1.0"},
+    )
     response.raise_for_status()
+    rate, observation_date = _parse_algolab_html(response.text)
     try:
-        payload = response.json()
-    except (requests.JSONDecodeError, ValueError) as exc:
-        raise FXSourceSchemaError("Verified FX response is not valid JSON") from exc
-    rate, observation_date = _parse_verified_rate(payload, settings)
-    _log("fetch_done", date=observation_date.isoformat(), rate=rate)
+        max_age_days = int(settings.get("max_age_days", 7))
+    except (TypeError, ValueError) as exc:
+        raise FXSourceUnavailableError("Invalid FX max_age_days configuration") from exc
+    _validate_freshness(observation_date, max(1, max_age_days))
+    _log("fetch_done", date=observation_date.isoformat(), rate=rate, provider=SOURCE_NAME)
     return rate, observation_date
 
 
@@ -229,14 +282,12 @@ def _fetch_with_retries() -> tuple[int, date]:
     for attempt in range(retry_count + 1):
         try:
             return _fetch_rate()
-        except FXSourceUnavailableError:
-            raise
-        except FXSourceSchemaError:
+        except (FXSourceUnavailableError, FXSourceSchemaError):
             raise
         except (requests.Timeout, requests.ConnectionError) as exc:
-            _log("fetch_retryable_error", attempt=attempt + 1, error=str(exc))
             if attempt >= retry_count:
                 raise
+            _log("fetch_retryable_error", attempt=attempt + 1, error=str(exc))
             time.sleep(retry_delay)
     raise FXSourceUnavailableError("FX source fetch exhausted without a result")
 
@@ -286,19 +337,19 @@ def run() -> int:
     today = date.today()
     _log("collector_start", today=today.isoformat(), weekday=today.strftime("%A"))
 
+    try:
+        settings = _fx_config()
+    except FXSourceUnavailableError as exc:
+        _log("source_unavailable", error=str(exc))
+        sys.exit(1)
+    if settings.get("source_status") == "unavailable":
+        _log("source_unavailable", source_id=settings.get("source_id"), optional=settings.get("optional"))
+        sys.exit(1)
+
     # Skip weekends
     if today.weekday() >= 5:  # 5=Saturday, 6=Sunday
         _log("skip_weekend", reason="not a working day, skip", day=today.strftime("%A"))
         return 0
-
-    csv_path = _csv_path()
-
-    # Idempotency: skip if today already exists
-    if _date_exists_in_csv(csv_path, today):
-        _log("up_to_date", date=today.isoformat())
-        return 0
-
-    extracted_at = _utcnow_iso()
 
     try:
         rate, observation_date = _fetch_with_retries()
@@ -310,7 +361,7 @@ def run() -> int:
         )
         sys.exit(1)
     except (FXSourceUnavailableError, FXSourceSchemaError, requests.RequestException) as exc:
-        _log("fetch_error", error=str(exc))
+        _log("source_unavailable" if isinstance(exc, FXSourceUnavailableError) else "fetch_error", error=str(exc))
         sys.exit(1)
 
     csv_path = _csv_path()
@@ -318,7 +369,6 @@ def run() -> int:
         _log("up_to_date", date=observation_date.isoformat())
         return 0
 
-    settings = _fx_config()
     row: dict[str, str] = {
         "date": observation_date.isoformat(),
         "base_currency": BASE_CURRENCY,
@@ -327,9 +377,12 @@ def run() -> int:
         "unit": UNIT,
         "rate_type": RATE_TYPE,
         "source_url": str(settings["source_url"]),
-        "source_attribution": str(settings["source_attribution"]),
+        "source_attribution": (
+            f"provider={SOURCE_NAME}; source_id={SOURCE_ID}; "
+            f"upstream={UPSTREAM_SOURCE}; provenance_status={PROVENANCE_STATUS}"
+        ),
         "source_value": _format_source_value(rate),
-        "extracted_at_utc": extracted_at,
+        "extracted_at_utc": _utcnow_iso(),
     }
 
     try:
@@ -338,7 +391,7 @@ def run() -> int:
         _log("write_error", error=str(exc), path=str(csv_path))
         sys.exit(1)
 
-    _log("collector_done", date=today.isoformat(), rate=rate, path=str(csv_path))
+    _log("collector_done", date=observation_date.isoformat(), rate=rate, path=str(csv_path))
     return 1
 
 

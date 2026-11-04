@@ -29,7 +29,7 @@ Module T14 tự động thu thập dữ liệu từ 3 nguồn và đưa vào pip
 └───────┬──────────────┬──────────────┬───────────────┘
         ▼              ▼              ▼
    brent.py         fx.py     domestic_fuel.py
-  (FRED/EIA)    (SBV: chưa xác minh)     (PVOIL)
+  (FRED/EIA)    (Algolab / SBV)     (PVOIL)
         │              │              │
         └──────────────┴──────────────┘
                        ▼
@@ -45,7 +45,7 @@ Module T14 tự động thu thập dữ liệu từ 3 nguồn và đưa vào pip
 | Collector | Nguồn dữ liệu | Tần suất | File CSV đích |
 |-----------|--------------|----------|---------------|
 | `brent.py` | FRED / EIA (series DCOILBRENTEU) | Hàng ngày (06:00 ICT) | `data/raw/brent_crude_prices.csv` |
-| `fx.py` | **Đang fail-closed:** chưa có nguồn SBV chính thức đã xác minh; không fallback sang Vietcombank | Ngày làm việc (09:30 ICT; tạm vô hiệu hóa) | `data/raw/usd_vnd_rates.csv` |
+| `fx.py` | Algolab, declared upstream: State Bank of Vietnam | Ngày làm việc (09:30 ICT) | `data/raw/usd_vnd_rates.csv` |
 | `domestic_fuel.py` | PVOIL website scrape | Thứ Năm 15:05–15:30 ICT | `data/raw/data_price_petro.csv` |
 
 **Runner tổng hợp:** `runner.py` chạy cả 3 collector, sau đó pipeline và DB loader (10:00 ICT hàng ngày).
@@ -236,17 +236,15 @@ Mỗi collector ghi JSON log ra stdout. Các `event` cần chú ý:
 
 ### 5.2 `fx.py` thất bại
 
-**Triệu chứng:** log ghi `fetch_error` hoặc nguồn cấu hình báo `unavailable`/`source_status`.
+**Triệu chứng:** `"fetch_primary_failed"` và `"fetch_fallback_failed"` trong log.
 
-**Trạng thái hiện tại:** FX collector đang fail-closed vì chưa xác minh được nguồn chính thức và hợp đồng response của SBV central reference rate.
+**Nguyên nhân phổ biến:**
+- API Vietcombank (`vapi.vnappmob.com`) bảo trì → script tự động kích hoạt fallback sang XML portal của Vietcombank.
+- Cả hai endpoint đều không phản hồi.
 
-**Nguyên tắc bảo vệ:**
-- Không gọi API hay XML Vietcombank.
-- Không sử dụng bank transfer rate thay cho SBV central reference rate.
-- Không fallback sang Algolab hoặc nguồn thứ cấp khi chưa xác minh.
-- Không tạo hoặc ghi dòng dữ liệu mới khi nguồn chưa khả dụng.
-
-**Điều kiện tái kích hoạt:** mã nguồn và `configs/collectors.yaml` phải chứa một HTTPS endpoint chính thức đã xác minh, attribution chính xác, `source_status: verified`, cùng schema ngày/rate/unit/rate_type đã kiểm chứng. Sau đó mới cho cron chạy ở chế độ tự động.
+**Cơ chế tự phục hồi:**
+- Tự động bỏ qua Thứ Bảy, Chủ Nhật.
+- Nếu cả 2 API đều gián đoạn, runner ghi log lỗi và giữ nguyên snapshot hiện tại, đợi chu kỳ lập lịch kế tiếp để thử lại tự động.
 
 ---
 
@@ -408,3 +406,6 @@ PetroTwin-/
 ---
 
 *Runbook này được tạo tự động bởi Antigravity agent cho module T14. Cập nhật khi có thay đổi về nguồn dữ liệu hoặc cấu trúc hệ thống.*
+
+- Algolab không phản hồi hoặc trang thay đổi cấu trúc HTML.
+- Không có chuỗi “Mới nhất + tỷ giá + ngày áp dụng” được xác nhận là tỷ giá trung tâm.

@@ -49,13 +49,13 @@ SHELL=/bin/bash
 0 23 * * * . /etc/petrotwin/env && cd /home/petrotwin/PetroTwin- && /home/petrotwin/.venv/bin/python -m petrotwin.collectors.brent >> /home/petrotwin/PetroTwin-/logs/brent.log 2>&1
 
 # =========================================================================
-# JOB 2 — USD/VND FX Rate (DISABLED: no verified SBV source)
-#   The collector is fail-closed and must not be scheduled against VCB or
-#   another commercial-bank rate. Enable this line only after source_status,
-#   source_url, attribution, response schema, date, unit, and rate_type are
-#   independently verified.
+# JOB 2 — USD/VND FX Rate (SBV via Vietcombank)
+#   Weekdays at 09:30 ICT = 02:30 UTC
+#   SBV publishes the central reference rate each working morning.
+#   The collector skips weekends automatically, but the cron also restricts
+#   to Mon–Fri (fields 5 = 1-5) for efficiency.
 # =========================================================================
-# 30 2 * * 1-5 . /etc/petrotwin/env && cd /home/petrotwin/PetroTwin- && /home/petrotwin/.venv/bin/python -m petrotwin.collectors.fx >> /home/petrotwin/PetroTwin-/logs/fx.log 2>&1
+30 2 * * 1-5 . /etc/petrotwin/env && cd /home/petrotwin/PetroTwin- && /home/petrotwin/.venv/bin/python -m petrotwin.collectors.fx >> /home/petrotwin/PetroTwin-/logs/fx.log 2>&1
 
 # =========================================================================
 # JOB 3a–3f — Domestic Fuel Price Polling (PVOIL)

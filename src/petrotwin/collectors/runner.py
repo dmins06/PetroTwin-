@@ -236,14 +236,25 @@ def main() -> None:
             retry_delay_seconds=max(0.0, float(settings.get("retry_delay_seconds", 0))),
         )
 
+    def collector_is_optional(section: str) -> bool:
+        settings = collector_config.get(section, {})
+        return settings.get("optional", False) is True
+
     # ---- Collectors --------------------------------------------------------
     brent_rows, brent_err = run_configured("petrotwin.collectors.brent", "brent")
     fx_rows, fx_err = run_configured("petrotwin.collectors.fx", "fx")
     fuel_rows, fuel_err = run_configured("petrotwin.collectors.domestic_fuel", "domestic_fuel")
 
-    any_collector_failed = any(
-        rows == -1 for rows in [brent_rows, fx_rows, fuel_rows]
-    )
+    collector_results = {
+        "brent": (brent_rows, brent_err, collector_is_optional("brent")),
+        "fx": (fx_rows, fx_err, collector_is_optional("fx")),
+        "domestic_fuel": (fuel_rows, fuel_err, collector_is_optional("domestic_fuel")),
+    }
+    required_collector_failed = any(rows == -1 and not optional for rows, _error, optional in collector_results.values())
+    optional_collector_failed = {
+        name: error for name, (rows, error, optional) in collector_results.items()
+        if rows == -1 and optional
+    }
     first_error: str | None = brent_err or fx_err or fuel_err
 
     # ---- Pipeline ----------------------------------------------------------
@@ -254,8 +265,8 @@ def main() -> None:
         _print("dry_run=true: skipping pipeline and loader")
         pipeline_status = "skipped"
         loader_status = "skipped"
-    elif any_collector_failed:
-        _print("one or more collectors failed; skipping pipeline and loader")
+    elif required_collector_failed:
+        _print("one or more required collectors failed; skipping pipeline and loader")
         pipeline_status = "skipped"
         loader_status = "skipped"
     else:
@@ -284,17 +295,21 @@ def main() -> None:
         "fuel_new_rows": fuel_rows if fuel_rows >= 0 else 0,
         "pipeline_status": pipeline_status,
         "loader_status": loader_status,
+        "optional_collectors_failed": sorted(optional_collector_failed),
         "error": first_error,
     }
-    _write_log_entry(log_entry)
-    _print(f"log_written path={_log_path()}")
-
     overall_ok = (
-        not any_collector_failed
+        not required_collector_failed
+        and not optional_collector_failed
         and pipeline_status in ("ok", "skipped")
         and loader_status in ("ok", "skipped", "no_db_config")
     )
-    _print(f"runner_done overall_ok={overall_ok}")
+    overall_status = "partial" if optional_collector_failed and required_collector_failed is False else (
+        "failed" if required_collector_failed or not overall_ok else "success"
+    )
+    log_entry["overall_status"] = overall_status
+    _write_log_entry(log_entry)
+    _print(f"runner_done overall_status={overall_status} overall_ok={overall_ok} optional_failures={sorted(optional_collector_failed)}")
     sys.exit(0 if overall_ok else 1)
 
 
