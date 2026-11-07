@@ -1,0 +1,82 @@
+name: PetroTwin Daily Data Update
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 16:00 Vietnam time (UTC+7)
+    - cron: "0 9 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: petrotwin-data-update
+  cancel-in-progress: false
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      PETROTWIN_DB_HOST: ${{ vars.PETROTWIN_DB_HOST }}
+      PETROTWIN_DB_PORT: ${{ vars.PETROTWIN_DB_PORT || '4000' }}
+      PETROTWIN_DB_NAME: ${{ vars.PETROTWIN_DB_NAME || 'petrotwin' }}
+      PETROTWIN_DB_USER: ${{ vars.PETROTWIN_DB_USER }}
+      PETROTWIN_DB_PASSWORD: ${{ secrets.PETROTWIN_DB_PASSWORD }}
+      PETROTWIN_DB_SSL: "true"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[collectors,mysql]"
+
+      - name: Validate database configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$PETROTWIN_DB_HOST" || {
+            echo "::error::Missing repository variable PETROTWIN_DB_HOST"
+            exit 1
+          }
+          test -n "$PETROTWIN_DB_USER" || {
+            echo "::error::Missing repository variable PETROTWIN_DB_USER"
+            exit 1
+          }
+          test -n "$PETROTWIN_DB_PASSWORD" || {
+            echo "::error::Missing repository secret PETROTWIN_DB_PASSWORD"
+            exit 1
+          }
+
+      - name: Run T14 collection and database publishing
+        run: python -m petrotwin.collectors.runner
+
+      - name: Commit updated tracked raw data
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -u -- data/raw
+
+          if git diff --cached --quiet; then
+            echo "No tracked raw CSV changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git commit -m "data: update daily market datasets"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
