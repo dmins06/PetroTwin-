@@ -17,7 +17,7 @@ One row per market series and observation date (and source vintage, if the provi
 | `value` | DECIMAL | Parsed numeric value; NULL only when `observation_status='missing'`. |
 | `unit_code` | enum | Brent: `USD/bbl`; FX: `VND/USD`. Must match `series_id`. |
 | `observation_status` | enum | `observed` or `missing`; a missing row must have a NULL value. |
-| `source_id` | string | Stable source identifier, e.g. `eia_fred` or `sbv_reference_via_algolab`. |
+| `source_id` | string | Stable source identifier, e.g. `eia_fred` or `algolab_sbv_central_rate`. |
 | `snapshot_id` | string | Non-null ID of the immutable ingested file; joins to the manifest. |
 | `source_value` | string, nullable | Original displayed source value, retained for audit. |
 | `source_url` | string | URL recorded in the source snapshot. |
@@ -91,6 +91,10 @@ Join rule: for a fuel event on local date `D`, select the latest `observation_da
 
 Store one manifest row per ingested file: `snapshot_id`, source ID, source URL, publisher/attribution, license/reuse terms (or `unknown`), retrieval timestamp UTC, file checksum, raw filename, row count, and detected source schema fingerprint. The current raw files do not establish license terms; record them as unknown until verified. Keep original fields in staging or the immutable raw file even when they are not promoted to canonical columns.
 
+### Algolab FX provenance
+
+The current raw FX CSV retains its pinned header. New rows record Algolab provenance in `source_attribution` using the structured text `provider=Algolab; source_id=algolab_sbv_central_rate; upstream=State Bank of Vietnam; provenance_status=provider_declared`; `source_url`, `rate_type`, and `source_value` remain the dedicated CSV columns. This preserves historical data without rewriting `data/raw/usd_vnd_rates.csv`. A future provenance schema change should add explicit `source_id`, `source_name`, `upstream_source`, and `provenance_status` columns together with pipeline/header migration, database loader changes, and a schema-version increment; it should not rewrite historical snapshots.
+
 ## Timestamp rules
 
 - Parse market `date` and fuel source `date`/`effective_date` as strict ISO `YYYY-MM-DD` calendar dates. Reject invalid dates and ambiguous locale formats; never parse them as UTC instants.
@@ -138,4 +142,4 @@ Run these checks before publishing processed data:
 
 ## Current source assessment and unresolved decisions
 
-The current files report Brent as EIA data distributed by FRED, FX as Algolab-attributed values whose SBV central-reference status remains unverified, and domestic prices from PVOIL. The PVOIL page was not independently retrievable during the initial audit. Record these source confidence limits in the manifest and verify source licenses before declaring the processed snapshot production-ready.
+The current files report Brent as EIA data distributed by FRED, FX as SBV central reference rates attributed through Algolab, and domestic prices from PVOIL. The PVOIL page was not independently retrievable during the initial audit, and the FX file uses a secondary source. Record these source confidence limits in the manifest; verify source licenses and confirm zero-price FO semantics before declaring the processed snapshot production-ready.

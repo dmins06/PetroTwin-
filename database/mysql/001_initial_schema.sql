@@ -12,7 +12,7 @@ CREATE TABLE dataset_run (
   completed_at_utc DATETIME(6) NULL,
   manifest_json JSON NOT NULL,
   created_at_utc DATETIME(6) NOT NULL,
-  CHECK (publication_status IN ('building','validated','validated_with_quarantine','failed'))
+  CHECK (publication_status IN ('building','validated','validated_with_quarantine','validated_with_optional_source_missing','validated_with_optional_source_stale','failed'))
 ) ENGINE=InnoDB;
 
 CREATE TABLE source_snapshot (

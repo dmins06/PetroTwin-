@@ -67,6 +67,10 @@ class PipelineError(Exception):
     """Raised when a batch cannot safely be published."""
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -357,6 +361,7 @@ def _parse_fuel(
     seen_source_rows: set[tuple[str, ...]] = set()
     exact_duplicates = 0
     missing_changes = 0
+    missing_values = 0
     zero_prices = 0
     normalized_24_source_rows = 0
     normalized_24_canonical_rows = 0
@@ -410,6 +415,7 @@ def _parse_fuel(
             })
             continue
         if change is None:
+            missing_values += 1
             missing_changes += 1
             price_change_missing_by_product[product_id] += 1
 
@@ -490,6 +496,7 @@ def _parse_fuel(
         "rows_read": len(raw_rows),
         "rows_canonical": len(output),
         "exact_duplicates_collapsed": exact_duplicates,
+        "missing_values": missing_values,
         "quarantined_rows": len(quarantine),
         "zero_prices_quarantined": zero_prices,
         "missing_price_change_values": missing_changes,
@@ -558,13 +565,39 @@ def _apply_fund_annotations(fuel_rows: list[dict[str, Any]], annotation_path: Pa
     return count
 
 
+def _determine_publication_status(
+    fx_optional: bool,
+    fx_condition: str,
+    has_quarantine: bool,
+) -> str:
+    """Determine publication status by explicit precedence:
+    1. validated_with_optional_source_stale: if optional FX is stale.
+    2. validated_with_optional_source_missing: if optional FX is missing, empty, or unusable.
+    3. validated_with_quarantine: if any rows were quarantined (and optional sources are intact).
+    4. validated: all sources valid, canonical, and zero quarantine.
+
+    Quarantine details (counts, reason codes, raw rows) are always preserved in the quality
+    report and quarantine.csv regardless of publication status precedence.
+    """
+    if fx_optional and fx_condition == "stale":
+        return "validated_with_optional_source_stale"
+    if fx_optional and fx_condition in {"missing", "empty", "unusable"}:
+        return "validated_with_optional_source_missing"
+    if has_quarantine:
+        return "validated_with_quarantine"
+    return "validated"
+
+
 def _validate_integrated_outputs(
     fuel_rows: list[dict[str, Any]],
     market_rows: list[dict[str, Any]],
     panel_rows: list[dict[str, Any]],
+    fx_required: bool = False,
 ) -> None:
     """Fail publication if joins lose events, duplicate keys, or introduce look-ahead."""
-    expected_series = {"brent_dated_usd_bbl", "usd_vnd_sbv_reference"}
+    expected_series = {"brent_dated_usd_bbl"}
+    if fx_required:
+        expected_series.add("usd_vnd_sbv_reference")
     observed_series = {row["series_id"] for row in market_rows}
     if not expected_series.issubset(observed_series):
         raise PipelineError(
@@ -659,7 +692,7 @@ def _integrate_fuel_market(
             "brent_observation_date", "brent_usd_per_barrel", "brent_age_days", "USD/bbl", "eia_fred"
         ),
         "usd_vnd_sbv_reference": (
-            "fx_observation_date", "usd_vnd_rate", "fx_age_days", "VND/USD", "sbv_reference_via_algolab"
+            "fx_observation_date", "usd_vnd_rate", "fx_age_days", "VND/USD", "algolab_sbv_central_rate"
         ),
     }
     integrated: list[dict[str, Any]] = []
@@ -707,23 +740,79 @@ def _integrate_fuel_market(
     return integrated, dict(sorted(missing_features.items()))
 
 
+def _validate_fx_config(collectors_config: Any) -> tuple[bool, int]:
+    """Validate collectors_config.fx and return (fx_optional, fx_max_age_days) with defaults."""
+    if not isinstance(collectors_config, dict):
+        raise PipelineError(
+            f"collectors config must be a mapping, got {type(collectors_config).__name__}"
+        )
+    if "fx" not in collectors_config or collectors_config.get("fx") is None:
+        return False, 7
+
+    fx_config = collectors_config["fx"]
+    if not isinstance(fx_config, dict):
+        raise PipelineError(
+            f"collectors_config.fx must be a mapping, got {type(fx_config).__name__}"
+        )
+
+    # Validate 'optional': must be an actual boolean
+    if "optional" not in fx_config or fx_config.get("optional") is None:
+        fx_optional = False
+    else:
+        raw_optional = fx_config["optional"]
+        if not isinstance(raw_optional, bool):
+            raise PipelineError(
+                f"collectors_config.fx.optional must be a boolean, got {type(raw_optional).__name__} ({raw_optional!r})"
+            )
+        fx_optional = raw_optional
+
+    # Validate 'max_age_days': must be a non-negative integer (not bool, float, string or negative)
+    if "max_age_days" not in fx_config or fx_config.get("max_age_days") is None:
+        fx_max_age_days = 7
+    else:
+        raw_max_age = fx_config["max_age_days"]
+        if isinstance(raw_max_age, bool) or not isinstance(raw_max_age, int) or raw_max_age < 0:
+            raise PipelineError(
+                f"collectors_config.fx.max_age_days must be a non-negative integer, got {type(raw_max_age).__name__} ({raw_max_age!r})"
+            )
+        fx_max_age_days = raw_max_age
+
+    return fx_optional, fx_max_age_days
+
+
 def run_pipeline(
     raw_dir: Path,
     processed_dir: Path,
     log_dir: Path,
     config_path: Path,
+    collectors_config_path: Path | None = None,
+    current_date: date | None = None,
 ) -> dict[str, Any]:
     logger = _configure_logger(log_dir / "pipeline.log")
     started_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    if current_date is None:
+        current_date = datetime.now(LOCAL_TZ).date()
     try:
         config = _load_config(config_path)
         files = [raw_dir / BRENT_FILE, raw_dir / FX_FILE, raw_dir / FUEL_FILE]
-        missing_files = [path.name for path in files if not path.is_file()]
+        if collectors_config_path is None:
+            collectors_config_path = _repo_root() / "configs" / "collectors.yaml"
+        elif not collectors_config_path.is_file():
+            raise PipelineError(f"collectors config file not found: {collectors_config_path}")
+        collectors_config: dict[str, Any] = {}
+        if collectors_config_path.is_file():
+            with collectors_config_path.open(encoding="utf-8") as stream:
+                collectors_config = yaml.safe_load(stream) or {}
+        fx_optional, fx_max_age_days = _validate_fx_config(collectors_config)
+        required_files = [files[0], files[2]]
+        if not fx_optional:
+            required_files.append(files[1])
+        missing_files = [path.name for path in required_files if not path.is_file()]
         if missing_files:
             raise PipelineError(f"missing required raw source files: {missing_files}")
 
         annotation_path = raw_dir.parent / "manual" / "stabilization_fund_annotations.csv"
-        file_hashes = {path.name: _sha256(path) for path in files}
+        file_hashes = {path.name: _sha256(path) for path in files if path.is_file()}
         if annotation_path.is_file():
             file_hashes["manual/stabilization_fund_annotations.csv"] = _sha256(annotation_path)
         pipeline_hash = _sha256(Path(__file__))
@@ -732,6 +821,8 @@ def run_pipeline(
             "pipeline_version": PIPELINE_VERSION,
             "pipeline_sha256": pipeline_hash,
             "config": config,
+            "collectors_config": collectors_config,
+            "current_date": current_date.isoformat(),
             "files": file_hashes,
         }, sort_keys=True, separators=(",", ":"))
         run_id = hashlib.sha256(run_seed.encode("utf-8")).hexdigest()[:20]
@@ -742,18 +833,87 @@ def run_pipeline(
             "unit", "USD/bbl", "Dollars per Barrel", "observation_status",
             file_hashes[files[0].name], EXPECTED_HEADERS[BRENT_FILE],
         )
-        fx, fx_q, fx_quality = _parse_market(
-            files[1], "sbv_reference_via_algolab", "usd_vnd_sbv_reference",
-            "rate_vnd_per_usd", "unit", "VND/USD", "VND per 1 USD", None,
-            file_hashes[files[1].name], EXPECTED_HEADERS[FX_FILE],
-        )
+        fx: list[dict[str, Any]] = []
+        fx_q: list[dict[str, Any]] = []
+        fx_is_stale = False
+        fx_age_days: int | None = None
+        fx_latest_date: date | None = None
+        fx_condition: str = "missing"
+        if files[1].is_file():
+            fx, fx_q, fx_quality = _parse_market(
+                files[1], "algolab_sbv_central_rate", "usd_vnd_sbv_reference",
+                "rate_vnd_per_usd", "unit", "VND/USD", "VND per 1 USD", None,
+                file_hashes[files[1].name], EXPECTED_HEADERS[FX_FILE],
+            )
+            if not fx:
+                if fx_quality["rows_read"] == 0:
+                    fx_condition = "empty"
+                    fx_quality["status"] = "optional_source_empty"
+                    if not fx_optional:
+                        raise PipelineError("required FX source is empty; no data rows found")
+                else:
+                    fx_condition = "unusable"
+                    fx_quality.pop("status", None)
+                    if not fx_optional:
+                        raise PipelineError(
+                            "required FX source is unusable: source contains rows but produces zero valid canonical observations"
+                        )
+                fx_quality["condition"] = fx_condition
+                fx_quality["latest_observation_date"] = None
+                fx_quality["age_days"] = None
+                fx_quality["max_age_days"] = fx_max_age_days
+            else:
+                fx_dates = [date.fromisoformat(row["observation_date"]) for row in fx]
+                fx_latest_date = max(fx_dates)
+                fx_age_days = (current_date - fx_latest_date).days
+                if fx_latest_date > current_date:
+                    raise PipelineError(
+                        f"FX observation date is in the future: latest observation {fx_latest_date.isoformat()} "
+                        f"is after current date {current_date.isoformat()}"
+                    )
+                fx_quality["latest_observation_date"] = fx_latest_date.isoformat()
+                fx_quality["age_days"] = fx_age_days
+                fx_quality["max_age_days"] = fx_max_age_days
+                if fx_age_days > fx_max_age_days:
+                    fx_is_stale = True
+                    fx_condition = "stale"
+                    fx_quality["status"] = "optional_source_stale"
+                    fx_quality["condition"] = "stale"
+                    if not fx_optional:
+                        raise PipelineError(
+                            f"required FX source is stale: latest observation {fx_latest_date.isoformat()} "
+                            f"is {fx_age_days} days old (max_age_days={fx_max_age_days})"
+                        )
+                else:
+                    fx_condition = "validated"
+                    fx_quality["status"] = "validated"
+                    fx_quality["condition"] = "validated"
+        else:
+            fx_condition = "missing"
+            fx_quality = {
+                "source_file": FX_FILE,
+                "rows_read": 0,
+                "rows_canonical": 0,
+                "status": "optional_source_missing",
+                "condition": "missing",
+                "first_observation_date": None,
+                "last_observation_date": None,
+                "latest_observation_date": None,
+                "age_days": None,
+                "max_age_days": fx_max_age_days,
+                "exact_duplicates_collapsed": 0,
+                "missing_values": 0,
+                "quarantined_rows": 0,
+            }
+
         fuel, fuel_q, fuel_quality = _parse_fuel(
             files[2], file_hashes[files[2].name], EXPECTED_HEADERS[FUEL_FILE]
         )
         fund_annotations_applied = _apply_fund_annotations(fuel, annotation_path)
 
+        market_input = brent + ([] if fx_is_stale else fx)
         market_rows, market_duplicates = _dedupe_or_fail(
-            brent + fx,
+            market_input,
             ("series_id", "observation_date", "source_id", "snapshot_id"),
             "market_observation",
         )
@@ -763,16 +923,15 @@ def run_pipeline(
             "fuel_price_observation",
         )
         panel_rows, missing_prior_market = _integrate_fuel_market(fuel, market_rows)
-        _validate_integrated_outputs(fuel, market_rows, panel_rows)
+        _validate_integrated_outputs(fuel, market_rows, panel_rows, not fx_optional)
         all_quarantine = brent_q + fx_q + fuel_q
 
         # Load source row counts and schema fingerprints for a complete provenance manifest.
         manifests = []
-        manifest_specs = [
-            (files[0], "eia_fred", "EIA, distributed by FRED", brent_quality["schema_fingerprint_sha256"]),
-            (files[1], "sbv_reference_via_algolab", "Algolab attributes values to GSO / SBV", fx_quality["schema_fingerprint_sha256"]),
-            (files[2], "pvoil", "PVOIL", fuel_quality["schema_fingerprint_sha256"]),
-        ]
+        manifest_specs = [(files[0], "eia_fred", "EIA, distributed by FRED", brent_quality["schema_fingerprint_sha256"])]
+        if files[1].is_file():
+            manifest_specs.append((files[1], "algolab_sbv_central_rate", "Algolab provider declaration; upstream SBV", fx_quality["schema_fingerprint_sha256"]))
+        manifest_specs.append((files[2], "pvoil", "PVOIL", fuel_quality["schema_fingerprint_sha256"]))
         for path, source_id, publisher, fingerprint in manifest_specs:
             manifests.append(_manifest_entry(path, source_id, publisher, fingerprint))
         if annotation_path.is_file():
@@ -831,7 +990,23 @@ def run_pipeline(
                     for series in sorted({row["series_id"] for row in market_rows})
                 },
             },
-            "publication_status": "validated_with_quarantine" if all_quarantine else "validated",
+            "publication_status": _determine_publication_status(
+                fx_optional=fx_optional,
+                fx_condition=fx_condition,
+                has_quarantine=bool(all_quarantine),
+            ),
+            "optional_sources_missing": (
+                [FX_FILE] if fx_optional and fx_condition == "missing" else []
+            ),
+            "optional_sources_empty": (
+                [FX_FILE] if fx_optional and fx_condition == "empty" else []
+            ),
+            "optional_sources_unusable": (
+                [FX_FILE] if fx_optional and fx_condition == "unusable" else []
+            ),
+            "optional_sources_stale": (
+                [FX_FILE] if fx_optional and fx_condition == "stale" else []
+            ),
             "sources": manifests,
         }
 
@@ -926,9 +1101,15 @@ def main() -> int:
     parser.add_argument("--processed-dir", type=Path, default=Path("data/processed"))
     parser.add_argument("--log-dir", type=Path, default=Path("data/interim/logs"))
     parser.add_argument("--config", type=Path, default=Path("configs/default.yaml"))
+    parser.add_argument("--collectors-config", type=Path, default=None)
+    parser.add_argument("--current-date", type=date.fromisoformat, default=None,
+                        help="Optional reference date for freshness check (YYYY-MM-DD)")
     args = parser.parse_args()
     try:
-        result = run_pipeline(args.raw_dir, args.processed_dir, args.log_dir, args.config)
+        result = run_pipeline(
+            args.raw_dir, args.processed_dir, args.log_dir, args.config,
+            args.collectors_config, current_date=args.current_date,
+        )
     except PipelineError:
         return 2
     print(json.dumps(result, ensure_ascii=False, indent=2))

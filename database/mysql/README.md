@@ -24,7 +24,7 @@ Raw source files remain immutable files under `data/raw`; the database stores th
 
 1. Create a `dataset_run` with status `building`; record its exact `source_snapshot` rows in `dataset_run_source`.
 2. Load and validate into staging tables. Check required columns, types, units, keys, time ordering, join cardinality, strict-prior feature dates, and quarantine counts against the v3 contract.
-3. In one transaction, insert the validated canonical rows, panel, quarantine rows, and quality report for the new `run_id`; set the run status to `validated` or `validated_with_quarantine`.
+3. In one transaction, insert the validated canonical rows, panel, quarantine rows, and quality report for the new `run_id`; set the run status according to precedence: `validated_with_optional_source_stale`, `validated_with_optional_source_missing` (when an optional source is missing, empty, or unusable), `validated_with_quarantine` (when source rows were quarantined), or `validated`.
 4. Update the singleton `dataset_current_pointer` only after all gates pass, then commit. On batch-level failure, roll back publication and leave the previous pointer unchanged.
 5. Consumers query `v_current_fuel_market_panel` (or the other `v_current_*` views) for the active data. Reproducible experiments should query by pinned `run_id` and record it with the model output.
 

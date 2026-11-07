@@ -38,6 +38,8 @@ import requests
 from bs4 import BeautifulSoup
 import yaml
 
+from petrotwin.collectors.locks import file_lock
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -440,68 +442,73 @@ def run() -> int:
     Raises:
         SystemExit: on scraping failure, HTTP error, or I/O failure.
     """
-    csv_path = _csv_path()
-    last_date = _last_date_in_csv(csv_path)
-    _log("collector_start", source=SOURCE_URL, last_date=str(last_date) if last_date else None)
+    with file_lock("domestic_fuel") as acquired:
+        if not acquired:
+            _log("lock_busy", collector="domestic_fuel", reason="Another process holds the domestic_fuel lock; skipping execution")
+            return 0
 
-    extracted_at = _utcnow_iso()
+        csv_path = _csv_path()
+        last_date = _last_date_in_csv(csv_path)
+        _log("collector_start", source=SOURCE_URL, last_date=str(last_date) if last_date else None)
 
-    # ---- Fetch HTML --------------------------------------------------------
-    try:
-        html = _fetch_html()
-    except requests.HTTPError as exc:
+        extracted_at = _utcnow_iso()
+
+        # ---- Fetch HTML --------------------------------------------------------
+        try:
+            html = _fetch_html()
+        except requests.HTTPError as exc:
+            _log(
+                "fetch_error",
+                error=str(exc),
+                status_code=exc.response.status_code if exc.response is not None else None,
+            )
+            sys.exit(1)
+        except requests.RequestException as exc:
+            _log("fetch_error", error=str(exc))
+            sys.exit(1)
+
+        # ---- Parse page --------------------------------------------------------
+        try:
+            announcement_date, price_records = _scrape_prices(html)
+        except Exception as exc:
+            _log("parse_error", error=str(exc))
+            sys.exit(1)
+
         _log(
-            "fetch_error",
-            error=str(exc),
-            status_code=exc.response.status_code if exc.response is not None else None,
-        )
-        sys.exit(1)
-    except requests.RequestException as exc:
-        _log("fetch_error", error=str(exc))
-        sys.exit(1)
-
-    # ---- Parse page --------------------------------------------------------
-    try:
-        announcement_date, price_records = _scrape_prices(html)
-    except Exception as exc:
-        _log("parse_error", error=str(exc))
-        sys.exit(1)
-
-    _log(
-        "parse_done",
-        announcement_date=announcement_date.isoformat(),
-        products_found=len(price_records),
-    )
-
-    # ---- Filter: only rows newer than last CSV date -------------------------
-    if last_date is not None and announcement_date <= last_date:
-        _log(
-            "up_to_date",
+            "parse_done",
             announcement_date=announcement_date.isoformat(),
-            last_date=str(last_date),
+            products_found=len(price_records),
         )
-        return 0
 
-    csv_rows = _build_csv_rows(announcement_date, price_records, extracted_at)
+        # ---- Filter: only rows newer than last CSV date -------------------------
+        if last_date is not None and announcement_date <= last_date:
+            _log(
+                "up_to_date",
+                announcement_date=announcement_date.isoformat(),
+                last_date=str(last_date),
+            )
+            return 0
 
-    if not csv_rows:
-        _log("no_new_rows")
-        return 0
+        csv_rows = _build_csv_rows(announcement_date, price_records, extracted_at)
 
-    # ---- Write (atomic) ----------------------------------------------------
-    try:
-        _append_to_csv(csv_path, csv_rows)
-    except OSError as exc:
-        _log("write_error", error=str(exc), path=str(csv_path))
-        sys.exit(1)
+        if not csv_rows:
+            _log("no_new_rows")
+            return 0
 
-    _log(
-        "collector_done",
-        announcement_date=announcement_date.isoformat(),
-        new_rows=len(csv_rows),
-        path=str(csv_path),
-    )
-    return len(csv_rows)
+        # ---- Write (atomic) ----------------------------------------------------
+        try:
+            _append_to_csv(csv_path, csv_rows)
+        except OSError as exc:
+            _log("write_error", error=str(exc), path=str(csv_path))
+            sys.exit(1)
+
+        _log(
+            "collector_done",
+            announcement_date=announcement_date.isoformat(),
+            new_rows=len(csv_rows),
+            path=str(csv_path),
+        )
+        return len(csv_rows)
 
 
 def main() -> None:

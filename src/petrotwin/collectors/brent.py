@@ -30,6 +30,8 @@ from typing import Sequence
 import requests
 import yaml
 
+from petrotwin.collectors.locks import file_lock
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -41,6 +43,7 @@ PUBLISHER = "U.S. Energy Information Administration (EIA), distributed by FRED"
 SOURCE_URL = "https://fred.stlouisfed.org/data/DCOILBRENTEU"
 
 FRED_TEXT_URL = "https://fred.stlouisfed.org/data/DCOILBRENTEU"
+FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DCOILBRENTEU"
 FRED_JSON_URL = "https://api.stlouisfed.org/fred/series/observations"
 
 COLUMNS: list[str] = [
@@ -133,9 +136,9 @@ def _last_date_in_csv(path: Path) -> date | None:
 # ---------------------------------------------------------------------------
 
 def _parse_text_response(text: str, since: date | None) -> list[dict[str, str]]:
-    """Parse the plain-text FRED file format into a list of observation dicts."""
+    """Parse FRED observation data (supports both tab-delimited and CSV formats)."""
     rows: list[dict[str, str]] = []
-    pattern = re.compile(r"^(\d{4}-\d{2}-\d{2})\t(.+)$")
+    pattern = re.compile(r"^(\d{4}-\d{2}-\d{2})[\t,](.+)$")
     for line in text.splitlines():
         m = pattern.match(line.strip())
         if not m:
@@ -152,13 +155,22 @@ def _parse_text_response(text: str, since: date | None) -> list[dict[str, str]]:
 
 
 def _fetch_via_text(since: date | None) -> list[dict[str, str]]:
-    """Download plain-text file from FRED (no API key required)."""
-    _log("fetch_start", method="text_file", url=FRED_TEXT_URL)
-    resp = requests.get(FRED_TEXT_URL, timeout=_request_timeout())
-    resp.raise_for_status()
-    rows = _parse_text_response(resp.text, since)
-    _log("fetch_done", method="text_file", raw_rows=len(rows))
-    return rows
+    """Download plain-text/CSV file from FRED (no API key required)."""
+    # Prefer fredgraph.csv direct data endpoint; fall back to FRED_TEXT_URL if needed
+    for candidate_url, method in [(FRED_CSV_URL, "csv_file"), (FRED_TEXT_URL, "text_file")]:
+        _log("fetch_start", method=method, url=candidate_url)
+        try:
+            resp = requests.get(candidate_url, timeout=_request_timeout())
+            resp.raise_for_status()
+            rows = _parse_text_response(resp.text, since)
+            if rows or candidate_url == FRED_TEXT_URL:
+                _log("fetch_done", method=method, raw_rows=len(rows))
+                return rows
+        except requests.RequestException as exc:
+            if candidate_url == FRED_TEXT_URL:
+                raise
+            _log("fetch_fallback", error=str(exc), next_url=FRED_TEXT_URL)
+    return []
 
 
 def _fetch_via_api(api_key: str, since: date | None) -> list[dict[str, str]]:
@@ -275,39 +287,44 @@ def run() -> int:
     Raises:
         SystemExit: on HTTP error or I/O failure.
     """
-    csv_path = _csv_path()
-    last_date = _last_date_in_csv(csv_path)
-    _log("collector_start", series=SERIES_ID, last_date=str(last_date) if last_date else None)
+    with file_lock("brent") as acquired:
+        if not acquired:
+            _log("lock_busy", collector="brent", reason="Another process holds the brent lock; skipping execution")
+            return 0
 
-    api_key = os.environ.get("FRED_API_KEY", "").strip()
-    extracted_at = _utcnow_iso()
+        csv_path = _csv_path()
+        last_date = _last_date_in_csv(csv_path)
+        _log("collector_start", series=SERIES_ID, last_date=str(last_date) if last_date else None)
 
-    try:
-        if api_key:
-            raw_rows = _fetch_via_api(api_key, last_date)
-        else:
-            raw_rows = _fetch_via_text(last_date)
-    except requests.HTTPError as exc:
-        _log("fetch_error", error=str(exc), status_code=exc.response.status_code if exc.response is not None else None)
-        sys.exit(1)
-    except requests.RequestException as exc:
-        _log("fetch_error", error=str(exc))
-        sys.exit(1)
+        api_key = os.environ.get("FRED_API_KEY", "").strip()
+        extracted_at = _utcnow_iso()
 
-    if not raw_rows:
-        _log("up_to_date", series=SERIES_ID, last_date=str(last_date) if last_date else None)
-        return 0
+        try:
+            if api_key:
+                raw_rows = _fetch_via_api(api_key, last_date)
+            else:
+                raw_rows = _fetch_via_text(last_date)
+        except requests.HTTPError as exc:
+            _log("fetch_error", error=str(exc), status_code=exc.response.status_code if exc.response is not None else None)
+            sys.exit(1)
+        except requests.RequestException as exc:
+            _log("fetch_error", error=str(exc))
+            sys.exit(1)
 
-    csv_rows = _build_csv_rows(raw_rows, extracted_at)
+        if not raw_rows:
+            _log("up_to_date", series=SERIES_ID, last_date=str(last_date) if last_date else None)
+            return 0
 
-    try:
-        _append_to_csv(csv_path, csv_rows)
-    except OSError as exc:
-        _log("write_error", error=str(exc), path=str(csv_path))
-        sys.exit(1)
+        csv_rows = _build_csv_rows(raw_rows, extracted_at)
 
-    _log("collector_done", series=SERIES_ID, new_rows=len(csv_rows), path=str(csv_path))
-    return len(csv_rows)
+        try:
+            _append_to_csv(csv_path, csv_rows)
+        except OSError as exc:
+            _log("write_error", error=str(exc), path=str(csv_path))
+            sys.exit(1)
+
+        _log("collector_done", series=SERIES_ID, new_rows=len(csv_rows), path=str(csv_path))
+        return len(csv_rows)
 
 
 def main() -> None:
