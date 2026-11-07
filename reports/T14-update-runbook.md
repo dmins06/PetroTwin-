@@ -91,7 +91,7 @@ sudo apt-get update && sudo apt-get install -y \
 
 ### Bước 2: Clone repository và tạo môi trường ảo
 ```bash
-sudo -u petrotwin git clone -b dmin-data https://github.com/dmin/PetroTwin-.git /home/petrotwin/PetroTwin-
+sudo -u petrotwin git clone -b dmin-data https://github.com/dmins06/PetroTwin-.git /home/petrotwin/PetroTwin-
 cd /home/petrotwin/PetroTwin-
 sudo -u petrotwin python3 -m venv /home/petrotwin/.venv
 sudo -u petrotwin /home/petrotwin/.venv/bin/pip install --upgrade pip
