@@ -1,7 +1,9 @@
-"""Collector for a verified USD/VND SBV central reference rate.
+"""Collector for USD/VND SBV central reference rate from Algolab.
 
-Collection is fail-closed while the official source remains unavailable.
-Commercial-bank rates are never used as an SBV substitute.
+This collector parses the daily SBV central reference rate as declared by
+Algolab (which identifies the State Bank of Vietnam as upstream).
+Provenance is tracked as 'provider_declared' and does not claim independent
+SBV verification. Commercial-bank rates are never used.
 
 Usage::
 
@@ -29,16 +31,21 @@ import yaml
 from bs4 import BeautifulSoup
 import re
 
+from petrotwin.collectors.locks import file_lock
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 BASE_CURRENCY = "USD"
+QUOTE_CURRENCY = "VND"
 SOURCE_ID = "algolab_sbv_central_rate"
 SOURCE_NAME = "Algolab"
 UPSTREAM_SOURCE = "State Bank of Vietnam"
 PROVENANCE_STATUS = "provider_declared"
-ALGOAB_URL = "https://algolab.vn/macro/vn-fx-rate-ty-gia-sbv-trung-tam"
+ALGOLAB_URL = "https://algolab.vn/macro/vn-fx-rate-ty-gia-sbv-trung-tam"
+# Backward-compatible name for callers using the previously misspelled constant.
+ALGOAB_URL = ALGOLAB_URL
 
 UNIT = "VND per 1 USD"
 RATE_TYPE = "SBV central reference rate"
@@ -220,22 +227,40 @@ def _parse_algolab_html(html: str) -> tuple[int, date]:
 
     soup = BeautifulSoup(html, "html.parser")
     visible_text = " ".join(soup.stripped_strings)
-    if re.search(r"Tỷ giá SBV trung tâm|T[ỷy] giá USD:.*SBV trung tâm", visible_text, re.IGNORECASE) is None:
+    if re.search(r"T[ỷy] giá SBV trung tâm|T[ỷy] giá USD[^\n]*SBV trung tâm", visible_text, re.IGNORECASE) is None:
         raise FXSourceSchemaError("Algolab HTML structure changed: central-rate page heading not found")
     if re.search(r"Nguồn\s*:\s*(?:GSO\s*/\s*)?SBV", visible_text, re.IGNORECASE) is None:
         raise FXSourceSchemaError("Algolab HTML structure changed: SBV source declaration not found")
 
-    match = re.search(
-        r"(?:Mới nhất|Latest)\s*([\d][\d.,]*)\s*([0-3]\d/[0-1]\d/[0-9]{4})",
-        visible_text,
-        re.IGNORECASE,
-    )
-    if match is None:
+    # Locate the latest central-rate card/section by searching for the "Mới nhất" or "Latest" label.
+    card_match = re.search(r"(?:Mới nhất|Latest)\b", visible_text, re.IGNORECASE)
+    if card_match is None:
         raise FXSourceSchemaError("Algolab HTML changed: latest central-rate card not found")
 
-    raw_rate, raw_date = match.groups()
+    # Scope extraction to a window around the label to prevent matching unrelated numbers elsewhere.
+    start_pos = card_match.start()
+    window = visible_text[max(0, start_pos - 60) : start_pos + 350]
+
+    # USD/VND central rate is a 5-digit rate (10,000–99,999 VND/USD, e.g. 25,627 or 25627).
+    # Explicit 5-digit pattern prevents accidentally matching timestamps (09:00), index ranks (#1),
+    # price change deltas (+15, -5), percentage changes (+0.06%), or 4-digit years (2026).
+    rate_match = re.search(r"\b([1-9]\d[.,]\d{3}|[1-9]\d{4})(?:[.,]0+)?\b", window)
+    if rate_match is None:
+        raise FXSourceSchemaError("Algolab central-rate card contains invalid date or rate")
+
+    date_match = re.search(r"\b([0-3]?\d[/-][0-1]?\d[/-][12]\d{3}|[12]\d{3}-[0-1]\d-[0-3]\d)\b", window)
+    if date_match is None:
+        raise FXSourceSchemaError("Algolab central-rate card contains invalid date or rate")
+
+    raw_rate = rate_match.group(1)
+    raw_date = date_match.group(1)
     try:
-        observation_date = datetime.strptime(raw_date, "%d/%m/%Y").date()
+        if "/" in raw_date:
+            observation_date = datetime.strptime(raw_date, "%d/%m/%Y").date()
+        elif "-" in raw_date and len(raw_date.split("-")[0]) == 4:
+            observation_date = date.fromisoformat(raw_date)
+        else:
+            observation_date = datetime.strptime(raw_date, "%d-%m-%Y").date()
         rate_decimal = float(raw_rate.replace(".", "").replace(",", ""))
     except (TypeError, ValueError) as exc:
         raise FXSourceSchemaError("Algolab central-rate card contains invalid date or rate") from exc
@@ -250,7 +275,7 @@ def _parse_algolab_html(html: str) -> tuple[int, date]:
 
 def _fetch_rate() -> tuple[int, date]:
     settings = _fx_config()
-    if settings.get("source_status") != "verified":
+    if settings.get("source_status") not in {"enabled", "verified"}:
         raise FXSourceUnavailableError(
             "Algolab central-rate source is not verified in configuration; "
             "commercial-bank rates will not be used"
@@ -334,65 +359,71 @@ def run() -> int:
     Returns:
         Number of new rows added (0 or 1).
     """
-    today = date.today()
-    _log("collector_start", today=today.isoformat(), weekday=today.strftime("%A"))
+    with file_lock("fx") as acquired:
+        if not acquired:
+            _log("lock_busy", collector="fx", reason="Another process holds the fx lock; skipping execution")
+            return 0
 
-    try:
-        settings = _fx_config()
-    except FXSourceUnavailableError as exc:
-        _log("source_unavailable", error=str(exc))
-        sys.exit(1)
-    if settings.get("source_status") == "unavailable":
-        _log("source_unavailable", source_id=settings.get("source_id"), optional=settings.get("optional"))
-        sys.exit(1)
+        today = date.today()
+        _log("collector_start", today=today.isoformat(), weekday=today.strftime("%A"))
 
-    # Skip weekends
-    if today.weekday() >= 5:  # 5=Saturday, 6=Sunday
-        _log("skip_weekend", reason="not a working day, skip", day=today.strftime("%A"))
-        return 0
+        try:
+            settings = _fx_config()
+        except FXSourceUnavailableError as exc:
+            _log("source_unavailable", error=str(exc))
+            sys.exit(1)
+        if settings.get("source_status") == "unavailable":
+            _log("source_unavailable", source_id=settings.get("source_id"), optional=settings.get("optional"))
+            sys.exit(1)
 
-    try:
-        rate, observation_date = _fetch_with_retries()
-    except requests.HTTPError as exc:
-        _log(
-            "fetch_error",
-            error=str(exc),
-            status_code=exc.response.status_code if exc.response is not None else None,
-        )
-        sys.exit(1)
-    except (FXSourceUnavailableError, FXSourceSchemaError, requests.RequestException) as exc:
-        _log("source_unavailable" if isinstance(exc, FXSourceUnavailableError) else "fetch_error", error=str(exc))
-        sys.exit(1)
+        # Skip weekends
+        if today.weekday() >= 5:  # 5=Saturday, 6=Sunday
+            _log("skip_weekend", reason="not a working day, skip", day=today.strftime("%A"))
+            return 0
 
-    csv_path = _csv_path()
-    if _date_exists_in_csv(csv_path, observation_date):
-        _log("up_to_date", date=observation_date.isoformat())
-        return 0
+        try:
+            rate, observation_date = _fetch_with_retries()
+        except requests.HTTPError as exc:
+            _log(
+                "fetch_error",
+                error=str(exc),
+                status_code=exc.response.status_code if exc.response is not None else None,
+            )
+            sys.exit(1)
+        except (FXSourceUnavailableError, FXSourceSchemaError, requests.RequestException) as exc:
+            _log("source_unavailable" if isinstance(exc, FXSourceUnavailableError) else "fetch_error", error=str(exc))
+            sys.exit(1)
 
-    row: dict[str, str] = {
-        "date": observation_date.isoformat(),
-        "base_currency": BASE_CURRENCY,
-        "quote_currency": QUOTE_CURRENCY,
-        "rate_vnd_per_usd": str(rate),
-        "unit": UNIT,
-        "rate_type": RATE_TYPE,
-        "source_url": str(settings["source_url"]),
-        "source_attribution": (
-            f"provider={SOURCE_NAME}; source_id={SOURCE_ID}; "
-            f"upstream={UPSTREAM_SOURCE}; provenance_status={PROVENANCE_STATUS}"
-        ),
-        "source_value": _format_source_value(rate),
-        "extracted_at_utc": _utcnow_iso(),
-    }
+        csv_path = _csv_path()
+        if _date_exists_in_csv(csv_path, observation_date):
+            _log("up_to_date", date=observation_date.isoformat())
+            return 0
 
-    try:
-        _append_to_csv(csv_path, [row])
-    except OSError as exc:
-        _log("write_error", error=str(exc), path=str(csv_path))
-        sys.exit(1)
+        row: dict[str, str] = {
+            "date": observation_date.isoformat(),
+            "base_currency": BASE_CURRENCY,
+            "quote_currency": QUOTE_CURRENCY,
+            "rate_vnd_per_usd": str(rate),
+            "unit": UNIT,
+            "rate_type": RATE_TYPE,
+            "source_url": str(settings["source_url"]),
+            "source_attribution": (
+                f"provider={SOURCE_NAME}; source_id={SOURCE_ID}; "
+                f"upstream={UPSTREAM_SOURCE}; provenance_status={PROVENANCE_STATUS}"
+            ),
+            "source_value": _format_source_value(rate),
+            "extracted_at_utc": _utcnow_iso(),
+        }
 
-    _log("collector_done", date=observation_date.isoformat(), rate=rate, path=str(csv_path))
-    return 1
+        try:
+            _append_to_csv(csv_path, [row])
+        except OSError as exc:
+            _log("write_error", error=str(exc), path=str(csv_path))
+            sys.exit(1)
+
+        _log("collector_done", date=observation_date.isoformat(), rate=rate, new_rows=1,
+             path=str(csv_path))
+        return 1
 
 
 def main() -> None:

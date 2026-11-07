@@ -11,7 +11,7 @@ brent:
 fx:
   source_id: algolab_sbv_central_rate
   source_name: Algolab
-  source_status: verified
+  source_status: enabled
   source_url: https://algolab.vn/macro/vn-fx-rate-ty-gia-sbv-trung-tam
   upstream_source: State Bank of Vietnam
   provenance_status: provider_declared

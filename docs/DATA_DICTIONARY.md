@@ -17,7 +17,7 @@ One row per market series and observation date (and source vintage, if the provi
 | `value` | DECIMAL | Parsed numeric value; NULL only when `observation_status='missing'`. |
 | `unit_code` | enum | Brent: `USD/bbl`; FX: `VND/USD`. Must match `series_id`. |
 | `observation_status` | enum | `observed` or `missing`; a missing row must have a NULL value. |
-| `source_id` | string | Stable source identifier, e.g. `eia_fred` or `sbv_reference_via_algolab`. |
+| `source_id` | string | Stable source identifier, e.g. `eia_fred` or `algolab_sbv_central_rate`. |
 | `snapshot_id` | string | Non-null ID of the immutable ingested file; joins to the manifest. |
 | `source_value` | string, nullable | Original displayed source value, retained for audit. |
 | `source_url` | string | URL recorded in the source snapshot. |
