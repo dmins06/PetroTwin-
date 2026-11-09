@@ -33,7 +33,7 @@ import tempfile
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Sequence
-
+import urllib3
 import requests
 from bs4 import BeautifulSoup
 import yaml
@@ -172,17 +172,51 @@ def _clean_number(text: str) -> int:
 # ---------------------------------------------------------------------------
 
 def _fetch_html() -> str:
-    """Download the PVOIL fuel price page HTML."""
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (compatible; PetroTwin-DataCollector/1.0; "
-            "+https://github.com/petrotwin)"
-        ),
-        "Accept-Language": "vi,en;q=0.9",
-    }
-    resp = requests.get(SOURCE_URL, headers=headers, timeout=_request_timeout())
-    resp.raise_for_status()
-    return resp.text
+    """Download PVOIL fuel prices through the verified origin connection."""
+    pool = urllib3.HTTPSConnectionPool(
+        "103.21.120.100",
+        server_hostname="www.pvoil.com.vn",
+        assert_hostname="www.pvoil.com.vn",
+        timeout=urllib3.Timeout(total=_request_timeout()),
+    )
+
+    try:
+        response = pool.request(
+            "GET",
+            "/api/oilprice/load-view",
+            headers={
+                "Host": "www.pvoil.com.vn",
+                "User-Agent": (
+                    "Mozilla/5.0 (compatible; PetroTwin-DataCollector/1.0; "
+                    "+https://github.com/dmins06/PetroTwin-)"
+                ),
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "vi,en;q=0.9",
+                "Referer": "https://www.pvoil.com.vn/",
+            },
+            retries=False,
+        )
+
+        if response.status >= 400:
+            error_response = requests.Response()
+            error_response.status_code = response.status
+            error_response.url = (
+                "https://www.pvoil.com.vn/api/oilprice/load-view"
+            )
+            error_response._content = response.data
+            error_response.reason = "PVOIL origin HTTP error"
+            error_response.encoding = "utf-8"
+            error_response.raise_for_status()
+
+        return response.data.decode("utf-8", errors="replace")
+
+    except urllib3.exceptions.HTTPError as exc:
+        raise requests.RequestException(
+            f"PVOIL origin connection failed: {exc}"
+        ) from exc
+
+    finally:
+        pool.close()
 
 
 def _parse_date_from_text(text: str) -> date | None:
@@ -218,153 +252,105 @@ def _parse_effective_time(text: str) -> str:
 
 
 def _normalize_product_name(raw: str) -> str | None:
-    """Map a raw product name string to a canonical KNOWN_PRODUCTS name."""
-    raw_stripped = raw.strip()
-    # Exact match first
-    if raw_stripped in KNOWN_PRODUCTS:
-        return raw_stripped
-    # Case-insensitive substring match
-    raw_lower = raw_stripped.lower()
+    """Map a product name to a canonical KNOWN_PRODUCTS entry."""
+    normalized = " ".join(raw.strip().split()).casefold()
+
     for canonical in KNOWN_PRODUCTS:
-        if canonical.lower() in raw_lower or raw_lower in canonical.lower():
+        if normalized == " ".join(canonical.split()).casefold():
             return canonical
+
     return None
 
 
 def _scrape_prices(html: str) -> tuple[date, list[dict[str, str | int]]]:
-    """Parse HTML and return (announcement_date, list of price records).
-
-    Each record contains:
-        product_name, price, change  (int values)
-
-    Raises:
-        ValueError: if no recognisable price table or date is found.
-    """
+    """Parse PVOIL price table and return its effective date and records."""
     soup = BeautifulSoup(html, "html.parser")
-
-    # -----------------------------------------------------------------------
-    # Strategy 1: find a <table> containing product rows
-    # -----------------------------------------------------------------------
     announcement_date: date | None = None
     price_records: list[dict[str, str | int]] = []
 
-    # Try to find the announcement date in headings or article titles
-    for tag in soup.find_all(["h1", "h2", "h3", "h4", "p", "span", "div"]):
-        text = tag.get_text(separator=" ", strip=True)
-        if any(kw in text.lower() for kw in ["giá xăng", "gia xang", "ngày", "điều chỉnh"]):
-            d = _parse_date_from_text(text)
-            if d is not None:
-                announcement_date = d
-                break
+    # Extract date from page headings first.
+    for tag in soup.find_all(["h1", "h2", "h3", "h4"]):
+        announcement_date = _parse_date_from_text(
+            tag.get_text(separator=" ", strip=True)
+        )
+        if announcement_date is not None:
+            break
 
-    # If still not found, use today as a conservative default
-    if announcement_date is None:
-        announcement_date = date.today()
-        _log("date_fallback", reason="Could not parse announcement date from page, using today")
-
-    # -----------------------------------------------------------------------
-    # Look for price data in tables
-    # -----------------------------------------------------------------------
-    tables = soup.find_all("table")
-    parsed_any = False
-
-    for table in tables:
+    for table in soup.find_all("table"):
         rows = table.find_all("tr")
+        table_text = table.get_text(separator=" ", strip=True)
+
+        if announcement_date is None:
+            announcement_date = _parse_date_from_text(table_text)
+
         for row in rows:
             cells = row.find_all(["td", "th"])
-            if len(cells) < 2:
-                continue
-            cell_texts = [c.get_text(separator=" ", strip=True) for c in cells]
-
-            # First cell is product name
-            product_raw = cell_texts[0]
-            canonical = _normalize_product_name(product_raw)
-            if canonical is None:
+            if len(cells) < 3:
                 continue
 
-            # Find a cell that looks like a price (>= 4-digit number)
-            price: int | None = None
-            change: int = 0
+            cell_texts = [
+                cell.get_text(separator=" ", strip=True)
+                for cell in cells
+            ]
 
-            for i, ct in enumerate(cell_texts[1:], start=1):
-                # Strip non-numeric except sign and separators
-                digits_only = re.sub(r"[^\d.,]", "", ct)
-                if len(digits_only) >= 4:
-                    try:
-                        candidate = _clean_number(ct)
-                        if candidate > 1000:  # plausible VND price
-                            if price is None:
-                                price = candidate
-                            else:
-                                # Could be the change column
-                                change_raw = re.sub(r"[^\d+\-.,]", "", ct)
-                                try:
-                                    change = int(re.sub(r"[.,]", "", change_raw))
-                                except ValueError:
-                                    pass
-                    except (ValueError, TypeError):
-                        continue
+            # Support both:
+            # product | price | change
+            # index | product | price | change
+            product_idx = 1 if cell_texts[0].strip().isdigit() else 0
+            price_idx = product_idx + 1
+            change_idx = product_idx + 2
 
-            # Check for explicit +/- change sign
-            for ct in cell_texts[1:]:
-                sign_match = re.search(r"([+-])[\s]*(\d[\d.,]*)", ct)
-                if sign_match:
-                    sign = 1 if sign_match.group(1) == "+" else -1
-                    try:
-                        change = sign * _clean_number(sign_match.group(2))
-                    except ValueError:
-                        pass
-                    break
-
-            if price is not None:
-                price_records.append(
-                    {"product_name": canonical, "price": price, "change": change}
-                )
-                parsed_any = True
-
-    # -----------------------------------------------------------------------
-    # Strategy 2: look for definition-list or article-structured data
-    # -----------------------------------------------------------------------
-    if not parsed_any:
-        # Try to find product/price pairs in paragraphs or list items
-        all_text_blocks = soup.find_all(["li", "p", "div"])
-        for block in all_text_blocks:
-            text = block.get_text(separator=" ", strip=True)
-            canonical = None
-            for prod in KNOWN_PRODUCTS:
-                if prod.lower() in text.lower():
-                    canonical = prod
-                    break
-            if canonical is None:
+            if change_idx >= len(cell_texts):
                 continue
 
-            # Try to find a price after a colon or in the same text
-            price_match = re.search(r"(\d{4,6})[.,]?\s*(?:đ|VND|đồng)?", text)
-            if price_match:
+            product_name = _normalize_product_name(
+                cell_texts[product_idx]
+            )
+            if product_name is None:
+                continue
+
+            try:
+                price = _clean_number(cell_texts[price_idx])
+            except (ValueError, TypeError):
+                continue
+
+            if price <= 1000:
+                continue
+
+            change_raw = re.sub(
+                r"[^\d+-]", "", cell_texts[change_idx]
+            )
+            change = 0
+            if change_raw and change_raw not in ("+", "-"):
                 try:
-                    price = _clean_number(price_match.group(1))
-                    if price > 1000:
-                        change = 0
-                        # Look for change
-                        chg_match = re.search(r"([+-])\s*(\d+)\s*(?:đ|VND|đồng)?", text)
-                        if chg_match:
-                            sign = 1 if chg_match.group(1) == "+" else -1
-                            change = sign * int(chg_match.group(2))
-                        price_records.append(
-                            {"product_name": canonical, "price": price, "change": change}
-                        )
-                        parsed_any = True
+                    change = int(change_raw)
                 except ValueError:
-                    continue
+                    pass
 
-    if not parsed_any or not price_records:
+            price_records.append({
+                "product_name": product_name,
+                "price": price,
+                "change": change,
+            })
+
+    # Check price rows first so an unavailable/changed page fails clearly.
+    if not price_records:
         raise ValueError(
-            "Could not parse any product price rows from PVOIL page. "
-            "The website structure may have changed."
+            "Could not parse any product price rows from PVOIL table."
         )
 
-    return announcement_date, price_records
+    if announcement_date is None:
+        raise ValueError(
+            "Could not extract PVOIL effective date from price table."
+        )
 
+    product_names = [
+        record["product_name"] for record in price_records
+    ]
+    if len(product_names) != len(set(product_names)):
+        raise ValueError("Duplicate product rows found in PVOIL table.")
+
+    return announcement_date, price_records
 
 # ---------------------------------------------------------------------------
 # CSV write

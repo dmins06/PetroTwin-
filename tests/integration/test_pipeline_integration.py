@@ -1,4 +1,5 @@
 import csv
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -138,7 +139,12 @@ def test_integration_case3_fx_optional_valid_data(tmp_path):
         ])
 
     quality = pipeline.run_pipeline(
-        raw_dir, processed_dir, log_dir, cfg_path, collectors_config_path=coll_cfg
+        raw_dir,
+        processed_dir,
+        log_dir,
+        cfg_path,
+        collectors_config_path=coll_cfg,
+        current_date=date(2026, 11, 6),
     )
     assert quality["publication_status"] == "validated"
     assert quality["optional_sources_missing"] == []
