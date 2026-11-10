@@ -107,6 +107,47 @@ def _load_env_file(path: Path | None = None) -> None:
 # Individual collector calls
 # ---------------------------------------------------------------------------
 
+def _echo_captured_stream(stream: str | bytes | None) -> None:
+    """Print lines from a captured process stream, decoding bytes as UTF-8."""
+    if not stream:
+        return
+    if isinstance(stream, bytes):
+        stream = stream.decode("utf-8", errors="replace")
+    if stream.strip():
+        for line in stream.splitlines():
+            print(line, flush=True)
+
+
+def _is_deterministic_error(output: str) -> bool:
+    """Check if the collector output reports a non-retryable deterministic error."""
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+            if not isinstance(record, dict):
+                continue
+            if record.get("deterministic") is True:
+                return True
+            category = record.get("category")
+            if category in {
+                "parsing_failure",
+                "schema_error",
+                "source_declaration_missing",
+                "stale_data",
+                "future_date",
+                "source_unavailable",
+            }:
+                return True
+            event = record.get("event")
+            if event in {"parse_error", "schema_error", "source_unavailable"}:
+                return True
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+    return False
+
+
 def _run_collector(
     module: str,
     retry_count: int = 0,
@@ -130,7 +171,9 @@ def _run_collector(
                 encoding="utf-8",
                 timeout=timeout_seconds,
             )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
+            _echo_captured_stream(getattr(exc, "stdout", None) or getattr(exc, "output", None))
+            _echo_captured_stream(getattr(exc, "stderr", None))
             err = f"{module} timed out after {timeout_seconds} seconds"
             _print(f"error: {err}")
             if attempt < retry_count:
@@ -146,17 +189,19 @@ def _run_collector(
             return -1, err
 
         # Echo output from every attempt so the retry history remains visible.
-        if result.stdout.strip():
-            for line in result.stdout.splitlines():
-                print(line, flush=True)
-        if result.stderr.strip():
-            for line in result.stderr.splitlines():
-                print(line, flush=True)
+        _echo_captured_stream(result.stdout)
+        _echo_captured_stream(result.stderr)
 
         if result.returncode == 0:
             break
         err = f"{module} exited with code {result.returncode}"
         _print(f"error: {err}")
+
+        # Skip retrying when the collector reported a deterministic parsing or schema error
+        if _is_deterministic_error(result.stdout):
+            _print(f"deterministic error detected for {module}; skipping retries")
+            return -1, err
+
         if attempt < retry_count:
             time.sleep(retry_delay_seconds)
     else:
@@ -339,11 +384,18 @@ def main() -> None:
 
         def run_configured(module: str, section: str) -> tuple[int, str | None]:
             settings = collector_config.get(section, {})
+            req_timeout = max(1.0, float(settings.get("request_timeout_seconds", 30)))
+            configured_runner_timeout = settings.get("runner_timeout_seconds")
+            if configured_runner_timeout is not None:
+                runner_timeout = max(1.0, float(configured_runner_timeout))
+            else:
+                runner_timeout = max(req_timeout + 30.0, 60.0)
+
             return _run_collector(
                 module,
                 retry_count=max(0, int(settings.get("retry_count", 0))),
                 retry_delay_seconds=max(0.0, float(settings.get("retry_delay_seconds", 0))),
-                timeout_seconds=max(1.0, float(settings.get("request_timeout_seconds", 120))),
+                timeout_seconds=runner_timeout,
             )
 
         def collector_is_optional(section: str) -> bool:

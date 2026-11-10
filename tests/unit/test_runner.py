@@ -66,6 +66,70 @@ def test_collector_timeout_is_reported(monkeypatch, tmp_path):
     assert "timed out" in error
 
 
+def test_runner_timeout_preserves_captured_stdout_and_stderr(capsys, monkeypatch, tmp_path):
+    import subprocess
+
+    monkeypatch.setattr(runner, "_repo_root", lambda: tmp_path)
+
+    calls = 0
+
+    def timed_out(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise subprocess.TimeoutExpired(
+            args[0],
+            kwargs["timeout"],
+            output=f'{{"event": "collector_start", "attempt": {calls}}}\n{{"event": "fetch_in_progress"}}\n',
+            stderr=f"warning: slow socket response attempt {calls}\n",
+        )
+
+    monkeypatch.setattr(runner.subprocess, "run", timed_out)
+    rows, error = runner._run_collector(
+        "petrotwin.collectors.domestic_fuel",
+        retry_count=1,
+        retry_delay_seconds=0,
+        timeout_seconds=5,
+    )
+    assert rows == -1
+    assert "timed out" in error
+    assert calls == 2  # 1 initial + 1 retry = 2 attempts
+
+    captured = capsys.readouterr().out
+    assert '{"event": "collector_start", "attempt": 1}' in captured
+    assert '{"event": "collector_start", "attempt": 2}' in captured
+    assert '{"event": "fetch_in_progress"}' in captured
+    assert "warning: slow socket response attempt 1" in captured
+    assert "warning: slow socket response attempt 2" in captured
+
+
+def test_runner_timeout_preserves_captured_bytes_stream(capsys, monkeypatch, tmp_path):
+    import subprocess
+
+    monkeypatch.setattr(runner, "_repo_root", lambda: tmp_path)
+
+    def timed_out(*args, **kwargs):
+        raise subprocess.TimeoutExpired(
+            args[0],
+            kwargs["timeout"],
+            output=b'{"event": "collector_start", "product": "X\xc4\x83ng RON 95-III"}\n',
+            stderr=b"warning: raw byte log\n",
+        )
+
+    monkeypatch.setattr(runner.subprocess, "run", timed_out)
+    rows, error = runner._run_collector(
+        "petrotwin.collectors.domestic_fuel",
+        retry_count=0,
+        retry_delay_seconds=0,
+        timeout_seconds=5,
+    )
+    assert rows == -1
+    assert "timed out" in error
+
+    captured = capsys.readouterr().out
+    assert "Xăng RON 95-III" in captured
+    assert "warning: raw byte log" in captured
+
+
 def test_pipeline_failure_is_not_success(monkeypatch, tmp_path):
     config_dir = tmp_path / "configs"
     config_dir.mkdir()
@@ -317,3 +381,120 @@ def test_load_env_file_populates_missing_vars(monkeypatch, tmp_path):
     assert os.environ["PETROTWIN_DB_PASSWORD"] == "custom_secret"
     # Existing variables should not be overwritten
     assert os.environ["PETROTWIN_EXISTING"] == "original_value"
+
+
+def test_runner_uses_configured_runner_timeout(monkeypatch, tmp_path):
+    captured_timeouts = {}
+
+    def mock_run_collector(module, **kwargs):
+        captured_timeouts[module] = kwargs.get("timeout_seconds")
+        return (1, None)
+
+    monkeypatch.setattr(runner, "_run_collector", mock_run_collector)
+    monkeypatch.setattr(runner, "_run_pipeline", lambda *args: ("ok", None))
+    monkeypatch.delenv("PETROTWIN_DB_HOST", raising=False)
+    monkeypatch.setattr(runner.sys, "argv", ["runner"])
+
+    config_text = (
+        "brent:\n  request_timeout_seconds: 30\n  runner_timeout_seconds: 60\n"
+        "fx:\n  request_timeout_seconds: 15\n  runner_timeout_seconds: 45\n  optional: true\n"
+        "domestic_fuel:\n  request_timeout_seconds: 30\n  runner_timeout_seconds: 70\n"
+    )
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    config_dir.joinpath("collectors.yaml").write_text(config_text, encoding="utf-8")
+    monkeypatch.setattr(runner, "_repo_root", lambda: tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        runner.main()
+    assert exc.value.code == 0
+    assert captured_timeouts["petrotwin.collectors.brent"] == 60.0
+    assert captured_timeouts["petrotwin.collectors.fx"] == 45.0
+    assert captured_timeouts["petrotwin.collectors.domestic_fuel"] == 70.0
+
+
+def test_runner_fallback_timeout_when_omitted(monkeypatch, tmp_path):
+    captured_timeouts = {}
+
+    def mock_run_collector(module, **kwargs):
+        captured_timeouts[module] = kwargs.get("timeout_seconds")
+        return (1, None)
+
+    monkeypatch.setattr(runner, "_run_collector", mock_run_collector)
+    monkeypatch.setattr(runner, "_run_pipeline", lambda *args: ("ok", None))
+    monkeypatch.delenv("PETROTWIN_DB_HOST", raising=False)
+    monkeypatch.setattr(runner.sys, "argv", ["runner"])
+
+    # domestic_fuel has request_timeout_seconds=40 but no runner_timeout_seconds
+    config_text = (
+        "brent:\n  request_timeout_seconds: 20\n"
+        "fx:\n  request_timeout_seconds: 15\n  optional: true\n"
+        "domestic_fuel:\n  request_timeout_seconds: 40\n"
+    )
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    config_dir.joinpath("collectors.yaml").write_text(config_text, encoding="utf-8")
+    monkeypatch.setattr(runner, "_repo_root", lambda: tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        runner.main()
+    assert exc.value.code == 0
+    # Fallback formula: max(req_timeout + 30.0, 60.0)
+    # brent: max(20 + 30, 60) = 60.0
+    # domestic_fuel: max(40 + 30, 60) = 70.0
+    assert captured_timeouts["petrotwin.collectors.brent"] == 60.0
+    assert captured_timeouts["petrotwin.collectors.domestic_fuel"] == 70.0
+
+
+def test_runner_skips_retries_on_deterministic_failure(monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+    import subprocess
+
+    monkeypatch.setattr(runner, "_repo_root", lambda: tmp_path)
+    calls = 0
+
+    def mock_subprocess_run(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        res = MagicMock()
+        res.returncode = 1
+        res.stdout = '{"event": "parse_error", "category": "parsing_failure", "deterministic": true}\n'
+        res.stderr = ""
+        return res
+
+    monkeypatch.setattr(subprocess, "run", mock_subprocess_run)
+    rows, err = runner._run_collector(
+        "petrotwin.collectors.domestic_fuel",
+        retry_count=3,
+        retry_delay_seconds=0,
+        timeout_seconds=10,
+    )
+    assert rows == -1
+    assert calls == 1  # Fast failure: no 3 retries!
+
+
+def test_runner_retries_on_transient_failure(monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+    import subprocess
+
+    monkeypatch.setattr(runner, "_repo_root", lambda: tmp_path)
+    calls = 0
+
+    def mock_subprocess_run(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        res = MagicMock()
+        res.returncode = 1
+        res.stdout = '{"event": "fetch_error", "category": "connection_timeout", "deterministic": false}\n'
+        res.stderr = ""
+        return res
+
+    monkeypatch.setattr(subprocess, "run", mock_subprocess_run)
+    rows, err = runner._run_collector(
+        "petrotwin.collectors.domestic_fuel",
+        retry_count=2,
+        retry_delay_seconds=0,
+        timeout_seconds=10,
+    )
+    assert rows == -1
+    assert calls == 3  # 1 initial + 2 retries = 3 attempts
