@@ -25,9 +25,14 @@ fx:
 
 domestic_fuel:
   source_id: pvoil
+  source_name: PVOIL
+  api_provider: "VietFuel API"
+  api_endpoint: "https://xangdau.nhatkhanhtech.com/api/fuel-prices/pvoil"
+  collection_method: "REST API"
   source_url: https://pvoil.com.vn/tin-gia-xang-dau
   license_reuse_terms: "unknown; verify with publisher"
   request_timeout_seconds: 30
+  runner_timeout_seconds: 60
   retry_count: 2
   retry_delay_seconds: 10
   default_effective_time: "15:00"
