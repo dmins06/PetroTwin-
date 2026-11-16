@@ -64,6 +64,28 @@ DEFAULT_RETRY_DELAY = 10.0
 
 CHANGE_REGEX = re.compile(r"^[+-]?\d+$")
 
+# Safe allowlisted response headers and bounds for HTTP error diagnostics
+SAFE_RESPONSE_HEADERS: tuple[str, ...] = (
+    "Content-Type",
+    "Server",
+    "Via",
+    "CF-Ray",
+    "Retry-After",
+    "X-Request-ID",
+)
+MAX_BODY_SCAN_BYTES: int = 16384
+MAX_BODY_PREVIEW_LENGTH: int = 1000
+MAX_HEADER_SCAN_LENGTH: int = 4096
+MAX_HEADER_VALUE_LENGTH: int = 256
+# Number of bytes inspected to detect HTML bodies regardless of Content-Type
+MAX_HTML_SNIFF_BYTES: int = 512
+
+CREDENTIAL_KEY_PATTERN: str = (
+    r"(?:access[_\-]?token|refresh[_\-]?token|client[_\-]?secret|"
+    r"x[_\-]?api[_\-]?key|api[_\-]?key|auth[_\-]?token|"
+    r"authorization|password|passwd|pwd|secret|token)"
+)
+
 # Canonical expected products (must exactly match these 4 products)
 EXPECTED_PRODUCTS: frozenset[str] = frozenset(
     [
@@ -163,6 +185,7 @@ class DomesticFuelFetchError(DomesticFuelError):
         message: str,
         status_code: int | None = None,
         deterministic: bool = False,
+        response_diagnostics: dict[str, Any] | None = None,
     ) -> None:
         category = "http_error" if status_code is not None else "connection_error"
         super().__init__(
@@ -171,6 +194,8 @@ class DomesticFuelFetchError(DomesticFuelError):
             status_code=status_code,
             deterministic=deterministic,
         )
+        self.response_diagnostics: dict[str, Any] = response_diagnostics or {}
+        self.diagnostics: dict[str, Any] = self.response_diagnostics
 
 
 class DomesticFuelAPIError(DomesticFuelError):
@@ -246,6 +271,307 @@ def _is_valid_https_url(url: Any) -> bool:
         return parsed.scheme == "https" and bool(parsed.netloc)
     except Exception:
         return False
+
+
+def _safe_network_error_message(exc: Exception) -> str:
+    """Produce a safe error message without leaking full URLs, query params, or credentials."""
+    cls_name = type(exc).__name__
+    if isinstance(exc, requests.exceptions.Timeout):
+        return f"{cls_name}: Request timed out"
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return f"{cls_name}: Connection failed"
+    return f"{cls_name}: Network error"
+
+
+def _sanitize_text_credentials(text: str) -> str:
+    """Redact Authorization headers, Bearer/Basic credentials, secrets, and URL parameters from text."""
+    if not text:
+        return ""
+
+    # 1. JSON field: redact the entire double-quoted value.
+    # Supports escaped quotes and apostrophes inside JSON strings.
+    text = re.sub(
+        r'(?i)("authorization"\s*:\s*")(?:\\.|[^"\\])*(")',
+        r'\g<1>[REDACTED]\g<2>',
+        text,
+    )
+
+    # 2. HTTP header: Authorization: ... -> redact everything to end of line
+    text = re.sub(
+        r'(?i)(\bauthorization\s*:\s*)[^\r\n]+',
+        r'\g<1>[REDACTED]',
+        text,
+    )
+
+    # 3. URL query: ?authorization=... or &authorization=... -> redact until next parameter or end of URL
+    text = re.sub(
+        r'(?i)([?&]|%26|%3f)(authorization)(=|%3d)((?:(?!%26)[^&\s"\'<>])*)',
+        r'\g<1>\g<2>\g<3>[REDACTED]',
+        text,
+    )
+
+    # 4. Standard key-value: authorization=... -> redact entire value
+    text = re.sub(
+        r'(?i)(?<![?&%])(\bauthorization\s*=\s*)([^\r\n&]+)',
+        r'\g<1>[REDACTED]',
+        text,
+    )
+
+    # 2. Standalone Bearer tokens (any length)
+    text = re.sub(
+        r"(?i)(bearer\s+)[^\s\"\'<>,;&}]+",
+        r"\1[REDACTED]",
+        text,
+    )
+
+    # 3. Standalone Basic credentials (base64-like string)
+    text = re.sub(
+        r"(?i)(basic\s+)[a-z0-9_\-\.\+/=]+",
+        r"\1[REDACTED]",
+        text,
+    )
+
+    # 4. Key-value / JSON credential pairs (camelCase, snake_case, kebab-case, UPPERCASE)
+    text = re.sub(
+        rf'(?i)(["\']?{CREDENTIAL_KEY_PATTERN}["\']?\s*[:=]\s*["\']?)([^"\'\s,;&}}]+)(["\']?)',
+        r'\1[REDACTED]\3',
+        text,
+    )
+
+    # 5. URL query parameters (plain ?/&= or URL-encoded %3F/%26/%3D)
+    text = re.sub(
+        rf'(?i)([?&]|%26|%3f)({CREDENTIAL_KEY_PATTERN}|key|signature|sig)(=|%3d)((?:(?!%26)[^&\s"\'<>])*)',
+        r'\1\2\3[REDACTED]',
+        text,
+    )
+
+    return text
+
+
+def _sanitize_header_value(
+    value: Any,
+    max_length: int = MAX_HEADER_VALUE_LENGTH,
+    max_input_length: int = MAX_HEADER_SCAN_LENGTH,
+) -> str:
+    """Sanitize an allowlisted response header value to prevent log injection and secret leaks."""
+    if value is None:
+        return ""
+    val_str = str(value)
+
+    # Bound input length BEFORE running regex operations to prevent CPU/ReDoS exhaustion
+    if len(val_str) > max_input_length:
+        val_str = val_str[:max_input_length]
+
+    # Strip control characters, CR, LF (ASCII 0x00-0x1f, 0x7f-0x9f) to prevent log injection
+    cleaned = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", val_str)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    # Redact credentials if present in header value
+    cleaned = _sanitize_text_credentials(cleaned)
+
+    # Limit length
+    if len(cleaned) > max_length:
+        cleaned = cleaned[:max_length]
+
+    return cleaned
+
+
+def _read_response_stream_bytes(
+    response: Any,
+    max_bytes: int = MAX_BODY_SCAN_BYTES,
+) -> bytes:
+    """Read at most max_bytes from the response stream without buffering the entire body into memory.
+
+    For real requests.Response instances the body is consumed strictly through
+    iter_content() so that response.content / response.text are never touched.
+    Mock objects in tests fall back to their configured .content / .text attributes.
+    """
+    # 1. For real requests.Response instances (streamed HTTP requests)
+    if isinstance(response, requests.Response):
+        chunks: list[bytes] = []
+        total = 0
+        try:
+            for chunk in response.iter_content(chunk_size=min(4096, max_bytes)):
+                if not chunk:
+                    continue
+                needed = max_bytes - total
+                if len(chunk) > needed:
+                    chunks.append(bytes(chunk[:needed]))
+                    total += needed
+                    break
+                chunks.append(bytes(chunk))
+                total += len(chunk)
+                if total >= max_bytes:
+                    break
+            return b"".join(chunks)
+        except Exception:
+            return b"".join(chunks)
+
+    # 2. For test mocks: use iter_content if the mock has it configured to yield bytes
+    if hasattr(response, "iter_content"):
+        chunks = []
+        total = 0
+        try:
+            for chunk in response.iter_content(chunk_size=min(4096, max_bytes)):
+                if not chunk:
+                    continue
+                if isinstance(chunk, str):
+                    chunk = chunk.encode("utf-8", errors="replace")
+                elif not isinstance(chunk, (bytes, bytearray)):
+                    continue
+                needed = max_bytes - total
+                if len(chunk) > needed:
+                    chunks.append(bytes(chunk[:needed]))
+                    total += needed
+                    break
+                chunks.append(bytes(chunk))
+                total += len(chunk)
+                if total >= max_bytes:
+                    break
+            if chunks:
+                return b"".join(chunks)
+        except Exception:
+            if chunks:
+                return b"".join(chunks)
+
+    # 3. For test mocks: check raw.read
+    raw = getattr(response, "raw", None)
+    if raw and hasattr(raw, "read"):
+        try:
+            read_fn = raw.read
+            if callable(read_fn):
+                data = read_fn(max_bytes)
+                if isinstance(data, (bytes, bytearray)):
+                    return bytes(data[:max_bytes])
+        except Exception:
+            pass
+
+    # 4. For test mocks only: fallback to mocked .content / .text attributes.
+    #    Real requests.Response instances never reach here because of the isinstance
+    #    guard at step 1 — they are returned (possibly empty) before this point.
+    try:
+        content = getattr(response, "content", None)
+        if isinstance(content, (bytes, bytearray)):
+            return bytes(content[:max_bytes])
+        text = getattr(response, "text", None)
+        if isinstance(text, str):
+            return text.encode("utf-8", errors="replace")[:max_bytes]
+    except Exception:
+        pass
+
+    return b""
+
+
+def _body_bytes_are_html(raw_bytes: bytes) -> bool:
+    """Return True if the leading bytes of a response body look like HTML.
+
+    Checks for the two canonical HTML signatures (case-insensitive, allowing
+    for a leading UTF-8 BOM and optional whitespace):
+      - ``<!doctype html``
+      - ``<html``
+
+    Only the first MAX_HTML_SNIFF_BYTES bytes are examined.
+    """
+    prefix = raw_bytes[:MAX_HTML_SNIFF_BYTES].lstrip()
+    if prefix.startswith(b"\xef\xbb\xbf"):
+        prefix = prefix[3:].lstrip()
+    # Cheap lower-casing on a small slice only
+    prefix_lower = prefix[:128].lower()
+    return prefix_lower.startswith(b"<!doctype html") or prefix_lower.startswith(b"<html")
+
+
+def _sanitize_response_body(
+    response: requests.Response,
+    max_length: int = MAX_BODY_PREVIEW_LENGTH,
+) -> str:
+    """Extract and sanitize a preview of the response body for safe diagnostics.
+
+    - Reads at most MAX_BODY_SCAN_BYTES from the response stream without loading full body.
+    - Detects HTML using BOTH the Content-Type header AND a bounded body-prefix sniff
+      (looking for ``<!doctype html`` or ``<html``).  This prevents raw HTML from leaking
+      when the server sends ``text/plain`` or omits Content-Type entirely.
+    - For HTML bodies: extracts only a sanitized <title> or a recognisable challenge
+      indicator; never logs raw HTML markup.
+    - For non-HTML bodies: conservatively redacts tokens, credentials, and query parameters.
+    - Removes control characters and bounds preview to max_length characters.
+    - Returns empty string for empty, unreadable, binary, or malformed bodies.
+    """
+    try:
+        content_type = ""
+        headers = getattr(response, "headers", None)
+        if headers and hasattr(headers, "get"):
+            content_type = str(headers.get("Content-Type", "")).lower()
+
+        # Read at most MAX_BODY_SCAN_BYTES from the response stream
+        raw_bytes = _read_response_stream_bytes(response, max_bytes=MAX_BODY_SCAN_BYTES)
+        if not raw_bytes:
+            return ""
+
+        encoding = getattr(response, "encoding", None) or "utf-8"
+        try:
+            text = raw_bytes.decode(encoding, errors="replace")
+        except Exception:
+            text = raw_bytes.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+    if not text:
+        return ""
+
+    # Determine whether this is an HTML response.
+    # Use Content-Type *or* a lightweight body-prefix sniff so that HTML
+    # bodies with a wrong/missing Content-Type header are still handled safely.
+    is_html = "text/html" in content_type or _body_bytes_are_html(raw_bytes)
+
+    # 1. HTML Responses: Never log raw HTML
+    if is_html:
+        title_match = re.search(r"(?is)<title[^>]*>(.*?)</title>", text)
+        if title_match:
+            raw_title = title_match.group(1)
+            # Remove any inner HTML tags, control characters, and normalize whitespace
+            clean_title = re.sub(r"<[^>]+>", "", raw_title)
+            clean_title = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", clean_title)
+            clean_title = re.sub(r"\s+", " ", clean_title).strip()
+            # Apply credential redaction to title as well
+            clean_title = _sanitize_text_credentials(clean_title)
+            clean_title = clean_title.strip()
+            if clean_title:
+                return f"HTML Title: {clean_title[:150]}"
+        # If title is missing or empty, check for recognizable challenge indicator
+        lower_text = text.lower()
+        if "cloudflare" in lower_text or "challenge" in lower_text or "just a moment" in lower_text:
+            return "HTML challenge page detected"
+        return ""
+
+    # 2. Non-HTML Responses (JSON, plain text): Remove control characters
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", text)
+
+    # Redact credentials and query parameters
+    cleaned = _sanitize_text_credentials(cleaned)
+
+    # Enforce maximum length limit after sanitization
+    if len(cleaned) > max_length:
+        cleaned = cleaned[:max_length]
+
+    return cleaned
+
+
+def _extract_safe_response_diagnostics(response: requests.Response) -> dict[str, Any]:
+    """Capture allowlisted response headers and sanitized body preview for >= 400 responses."""
+    captured_headers: dict[str, str] = {}
+    resp_headers = getattr(response, "headers", {}) or {}
+    for header in SAFE_RESPONSE_HEADERS:
+        if header in resp_headers:
+            captured_headers[header] = _sanitize_header_value(resp_headers[header])
+
+    body_preview = _sanitize_response_body(response, max_length=MAX_BODY_PREVIEW_LENGTH)
+
+    status_code = getattr(response, "status_code", None)
+    return {
+        "status_code": status_code,
+        "headers": captured_headers,
+        "body_preview": body_preview,
+    }
 
 
 def _collector_config() -> dict[str, Any]:
@@ -686,6 +1012,7 @@ def _fetch_api_with_retries(session: requests.Session | None = None) -> Any:
     try:
         for attempt in range(retry_count + 1):
             start_time = time.perf_counter()
+            response: requests.Response | None = None
             try:
                 response = session.get(
                     endpoint,
@@ -698,61 +1025,82 @@ def _fetch_api_with_retries(session: requests.Session | None = None) -> Any:
                     },
                     timeout=(connect_timeout, read_timeout),
                     verify=True,
+                    stream=True,
                 )
                 duration = time.perf_counter() - start_time
 
-                if response.status_code >= 500:
-                    if attempt < retry_count:
-                        _log(
-                            "fetch_retryable_error",
-                            attempt=attempt + 1,
-                            status_code=response.status_code,
-                            duration_seconds=round(duration, 3),
-                        )
-                        time.sleep(retry_delay)
-                        continue
-                    raise DomesticFuelFetchError(
-                        f"VietFuel API HTTP server error: {response.status_code}",
-                        status_code=response.status_code,
-                        deterministic=False,
-                    )
-
-                if response.status_code >= 400:
-                    raise DomesticFuelFetchError(
-                        f"VietFuel API HTTP client error: {response.status_code}",
-                        status_code=response.status_code,
-                        deterministic=True,
-                    )
-
                 try:
-                    payload = response.json()
-                except Exception as exc:
-                    raise DomesticFuelSchemaError(
-                        f"Failed to decode JSON from VietFuel API: {exc}"
-                    ) from exc
+                    if response.status_code >= 500:
+                        if attempt < retry_count:
+                            _log(
+                                "fetch_retryable_error",
+                                attempt=attempt + 1,
+                                status_code=response.status_code,
+                                duration_seconds=round(duration, 3),
+                            )
+                            response.close()
+                            time.sleep(retry_delay)
+                            continue
+                        diagnostics = _extract_safe_response_diagnostics(response)
+                        raise DomesticFuelFetchError(
+                            f"VietFuel API HTTP server error: {response.status_code}",
+                            status_code=response.status_code,
+                            deterministic=False,
+                            response_diagnostics=diagnostics,
+                        )
 
-                _log(
-                    "fetch_done",
-                    status_code=response.status_code,
-                    duration_seconds=round(duration, 3),
-                    response_size=len(response.content),
-                    api_provider=API_PROVIDER,
-                )
-                return payload
+                    if response.status_code >= 400:
+                        diagnostics = _extract_safe_response_diagnostics(response)
+                        if response.status_code == 403:
+                            _log(
+                                "http_403_diagnostics",
+                                **diagnostics,
+                            )
+                        raise DomesticFuelFetchError(
+                            f"VietFuel API HTTP client error: {response.status_code}",
+                            status_code=response.status_code,
+                            deterministic=True,
+                            response_diagnostics=diagnostics,
+                        )
+
+                    try:
+                        payload = response.json()
+                    except Exception as exc:
+                        raise DomesticFuelSchemaError(
+                            f"Failed to decode JSON from VietFuel API: {exc}"
+                        ) from exc
+
+                    response_size = (
+                        len(response.content)
+                        if hasattr(response, "_content") and isinstance(response._content, (bytes, bytearray))
+                        else 0
+                    )
+                    _log(
+                        "fetch_done",
+                        status_code=response.status_code,
+                        duration_seconds=round(duration, 3),
+                        response_size=response_size,
+                        api_provider=API_PROVIDER,
+                    )
+                    return payload
+                finally:
+                    response.close()
 
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
                 duration = time.perf_counter() - start_time
+                safe_err = _safe_network_error_message(exc)
                 if attempt < retry_count:
                     _log(
                         "fetch_retryable_error",
                         attempt=attempt + 1,
-                        error=str(exc),
+                        error=safe_err,
+                        error_class=type(exc).__name__,
                         duration_seconds=round(duration, 3),
                     )
                     time.sleep(retry_delay)
                     continue
                 raise DomesticFuelFetchError(
-                    f"Network error connecting to VietFuel API: {exc}",
+                    f"Network error connecting to VietFuel API: {safe_err}",
                     deterministic=False,
                 ) from exc
 
@@ -928,18 +1276,21 @@ def run() -> int:
         try:
             payload = _fetch_api_with_retries()
         except DomesticFuelError as exc:
-            _log(
-                "fetch_error",
-                error=str(exc),
-                category=exc.category,
-                status_code=exc.status_code,
-                deterministic=exc.deterministic,
-            )
+            log_kwargs: dict[str, Any] = {
+                "error": str(exc),
+                "category": exc.category,
+                "status_code": exc.status_code,
+                "deterministic": exc.deterministic,
+            }
+            if getattr(exc, "response_diagnostics", None):
+                log_kwargs["diagnostics"] = exc.response_diagnostics
+            _log("fetch_error", **log_kwargs)
             sys.exit(1)
         except Exception as exc:
+            safe_err = _safe_network_error_message(exc)
             _log(
                 "fetch_error",
-                error=str(exc),
+                error=safe_err,
                 category="connection_error",
                 deterministic=False,
             )
@@ -1023,18 +1374,21 @@ def check_only() -> int:
     try:
         payload = _fetch_api_with_retries()
     except DomesticFuelError as exc:
-        _log(
-            "check_fetch_error",
-            error=str(exc),
-            category=exc.category,
-            status_code=exc.status_code,
-            deterministic=exc.deterministic,
-        )
+        log_kwargs: dict[str, Any] = {
+            "error": str(exc),
+            "category": exc.category,
+            "status_code": exc.status_code,
+            "deterministic": exc.deterministic,
+        }
+        if getattr(exc, "response_diagnostics", None):
+            log_kwargs["diagnostics"] = exc.response_diagnostics
+        _log("check_fetch_error", **log_kwargs)
         sys.exit(1)
     except Exception as exc:
+        safe_err = _safe_network_error_message(exc)
         _log(
             "check_fetch_error",
-            error=str(exc),
+            error=safe_err,
             category="connection_error",
             deterministic=False,
         )
