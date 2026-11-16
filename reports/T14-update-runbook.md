@@ -38,8 +38,8 @@ Hệ thống tự động hóa T14 đảm bảo toàn bộ chu trình nạp, x�
 └────────┬───────────────────────┬───────────────────────┬───────────────┘
          │ 06:00 ICT             │ 09:30 ICT (T2-T6)     │ 15:05-15:30 (Thứ 5)
          ▼                       ▼                       ▼
-    brent.py                   fx.py              domestic_fuel.py
- (FRED/EIA API & CSV)     (Algolab SBV proxy)     (PVOIL retail scrape)
+    brent.py                   fx.py               comeco.py
+ (FRED/EIA API & CSV)     (Algolab SBV proxy)     (COMECO retail scrape)
          │                       │                       │
          └───────────────────────┼───────────────────────┘
                                  ▼
@@ -64,7 +64,7 @@ Hệ thống tự động hóa T14 đảm bảo toàn bộ chu trình nạp, x�
 |---|---|---|---|---|
 | `brent.py` | FRED / EIA (`DCOILBRENTEU`) | Hàng ngày 06:00 ICT | **Bắt buộc** | `data/raw/brent_crude_prices.csv` |
 | `fx.py` | Algolab (`algolab_sbv_central_rate`) | Ngày làm việc 09:30 ICT | **Tùy chọn** (`optional: true`) | `data/raw/usd_vnd_rates.csv` |
-| `domestic_fuel.py` | PVOIL công bố giá bán lẻ | Thứ Năm 15:05–15:30 ICT | **Bắt buộc** | `data/raw/data_price_petro.csv` |
+| `comeco.py` | COMECO công bố giá bán lẻ (`https://comeco.vn/`) | Thứ Năm 15:05–15:30 ICT | **Bắt buộc** | `data/raw/data_price_petro.csv` |
 
 ---
 
@@ -157,13 +157,15 @@ fx:
   retry_count: 3
   retry_delay_seconds: 5
 
-domestic_fuel:
-  source_id: pvoil
-  source_url: https://pvoil.com.vn/tin-gia-xang-dau
+comeco:
+  source_id: comeco
+  source_name: COMECO
+  source_url: https://comeco.vn/
   license_reuse_terms: "unknown; verify with publisher"
   request_timeout_seconds: 30
+  runner_timeout_seconds: 60
   retry_count: 2
-  retry_delay_seconds: 10
+  retry_delay_seconds: 5
   default_effective_time: "15:00"
 
 runner:
@@ -205,8 +207,9 @@ python -m petrotwin.collectors.brent
 # 2. Thu thập Tỷ giá FX
 python -m petrotwin.collectors.fx
 
-# 3. Thu thập Giá xăng lẻ PVOIL
-python -m petrotwin.collectors.domestic_fuel
+# 3. Thu thập Giá xăng lẻ COMECO (hoặc kiểm tra chế độ read-only với --check-only)
+python -m petrotwin.collectors.comeco --check-only
+python -m petrotwin.collectors.comeco
 ```
 
 *Mỗi collector đều có tính idempotent: nếu dữ liệu ngày hiện tại đã tồn tại trong CSV, script tự động ghi log `up_to_date` và thoát an toàn với mã 0 mà không ghi trùng dữ liệu.*
@@ -239,7 +242,7 @@ Runner điều phối tuần tự: chạy các collector → chạy pipeline →
    ```bash
    python -m petrotwin.collectors.runner
    ```
-   Chạy toàn bộ chu trình: gọi cả 3 collectors (`brent` → `fx` → `domestic_fuel`), sau đó chạy pipeline kiểm định và nạp MySQL nếu có cấu hình DB. Thích hợp cho vận hành thủ công hoặc kiểm tra toàn diện một lệnh duy nhất.
+   Chạy toàn bộ chu trình: gọi cả 3 collectors (`brent` → `fx` → `comeco`), sau đó chạy pipeline kiểm định và nạp MySQL nếu có cấu hình DB. Thích hợp cho vận hành thủ công hoặc kiểm tra toàn diện một lệnh duy nhất.
 
 2. **Chế độ chỉ chạy Pipeline & Loader (`--pipeline-only`):**
    ```bash
@@ -277,7 +280,7 @@ sudo systemctl start cron
 Hệ thống sử dụng module `petrotwin.collectors.locks` thực thi khóa mức hạt nhân `fcntl.flock` trên các file nằm trong thư mục `logs/locks/`:
 - `brent.lock`: Bảo vệ collector Brent crude.
 - `fx.lock`: Bảo vệ collector tỷ giá USD/VND.
-- `domestic_fuel.lock`: Bảo vệ collector giá xăng bán lẻ.
+- `comeco.lock`: Bảo vệ collector giá xăng bán lẻ COMECO.
 - `runner.lock`: Bảo vệ orchestration runner toàn cục.
 - `pipeline.lock`: Bảo vệ tiến trình pipeline và publication snapshot.
 
@@ -303,7 +306,7 @@ CRON_TZ=Asia/Ho_Chi_Minh
 30 9 * * 1-5 set -a && . /etc/petrotwin/env && set +a && mkdir -p /home/petrotwin/PetroTwin-/logs/locks && cd /home/petrotwin/PetroTwin- && /home/petrotwin/.venv/bin/python -m petrotwin.collectors.fx >> /home/petrotwin/PetroTwin-/logs/fx.log 2>&1
 
 # JOB 3 — Domestic Fuel Polling Thứ Năm mỗi 5 phút (15:05–15:30 ICT)
-5-30/5 15 * * 4 set -a && . /etc/petrotwin/env && set +a && mkdir -p /home/petrotwin/PetroTwin-/logs/locks && cd /home/petrotwin/PetroTwin- && /home/petrotwin/.venv/bin/python -m petrotwin.collectors.domestic_fuel >> /home/petrotwin/PetroTwin-/logs/domestic_fuel.log 2>&1
+5-30/5 15 * * 4 set -a && . /etc/petrotwin/env && set +a && mkdir -p /home/petrotwin/PetroTwin-/logs/locks && cd /home/petrotwin/PetroTwin- && /home/petrotwin/.venv/bin/python -m petrotwin.collectors.comeco >> /home/petrotwin/PetroTwin-/logs/comeco.log 2>&1
 
 # JOB 4a — Pipeline & Loader ngày thường (CN, T2–T4, T6–T7 lúc 10:00 ICT)
 0 10 * * 0,1,2,3,5,6 set -a && . /etc/petrotwin/env && set +a && mkdir -p /home/petrotwin/PetroTwin-/logs/locks && cd /home/petrotwin/PetroTwin- && /home/petrotwin/.venv/bin/python -m petrotwin.collectors.runner --pipeline-only >> /home/petrotwin/PetroTwin-/logs/runner.log 2>&1
@@ -381,12 +384,13 @@ File `logs/collector_run.log` lưu nhật ký chạy JSON structured log mỗi l
 - **Nguyên nhân:** Trang Algolab thay đổi cấu trúc hoặc không truy cập được.
 - **Xử lý:** Chạy kiểm tra riêng `python -m petrotwin.collectors.fx`. Vì FX là `optional: true`, hệ thống vẫn tiếp tục vận hành an toàn. Nếu cần khôi phục, kiểm tra cấu trúc thẻ HTML của Algolab và cập nhật `_parse_algolab_html`.
 
-### 12.3 PVOIL collector gặp lỗi (`HTTP 403 Forbidden`)
-- **Nguyên nhân:** Cloudflare bot challenge chặn IP trung tâm dữ liệu của server khi gọi cào trang `https://pvoil.com.vn/tin-gia-xang-dau`.
+### 12.3 COMECO collector gặp lỗi (`HTTP 4xx/5xx` hoặc cấu trúc thay đổi)
+- **Nguyên nhân:** Mạng kết nối gián đoạn hoặc COMECO cập nhật giao diện web.
 - **Xử lý:**
-  1. Kiểm tra bằng `curl -I "https://pvoil.com.vn/tin-gia-xang-dau"`.
-  2. Nếu bị Cloudflare chặn, cần cấu hình proxy dân cư sạch hoặc bổ sung header/cookie hợp lệ trong `_fetch_html()`.
-  3. Collector fail-safe dừng lại với mã lỗi 1 và không làm hỏng file dữ liệu lịch sử.
+  1. Kiểm tra nhanh bằng chế độ read-only chẩn đoán: `python -m petrotwin.collectors.comeco --check-only`.
+  2. Kiểm tra trực tiếp website bằng `curl -I "https://comeco.vn/"`.
+  3. Nếu cấu trúc bảng giá thay đổi, cập nhật `_parse_comeco_html()`.
+  4. Collector fail-safe dừng lại với mã lỗi 1 và không làm hỏng file dữ liệu lịch sử.
 
 ---
 
@@ -403,5 +407,5 @@ File `logs/collector_run.log` lưu nhật ký chạy JSON structured log mỗi l
 
 ## 14. Các giới hạn kỹ thuật còn tồn tại
 
-1. **Nguồn PVOIL và Cloudflare WAF:** Trang web PVOIL sử dụng Cloudflare WAF challenge. Một số IP máy chủ nước ngoài hoặc datacenter sẽ bị trả về HTTP 403. Cần kiểm tra smoke test trực tiếp trên server thực tế trước khi kích hoạt job cron production.
+1. **Nguồn COMECO:** Website COMECO phân phối HTML render sẵn từ server không qua Cloudflare WAF bot challenge, cho phép thu thập ổn định từ server và CI. Tuy nhiên vẫn cần giám sát định kỳ thông qua flag `--check-only` để phát hiện sớm các thay đổi giao diện web.
 2. **Tỷ giá FX từ Algolab:** Dữ liệu tỷ giá USD/VND trung tâm được cung cấp theo hình thức bên thứ ba tự công bố (`provider_declared`), chưa phải kết nối trực tiếp API của Ngân hàng Nhà nước Việt Nam (SBV).

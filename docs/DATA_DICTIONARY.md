@@ -45,7 +45,7 @@ One row per fuel product and effective instant. A price adjustment is an event; 
 | `stabilization_fund_subsidy_unit` | string | Unit for the fund spending amount: `VND/liter` or `VND/kg`. |
 | `stabilization_fund_source_url` | string, nullable | Official MOIT source supporting the annotation. |
 | `tax_included` | boolean, nullable | Parse source field; do not default when absent or malformed. |
-| `source_id` | string | `pvoil` for the current snapshot. |
+| `source_id` | string | `comeco` for current data; `pvoil` for historical records. |
 | `snapshot_id` | string | Non-null ID of the immutable ingested file; joins to the manifest. |
 | `source_url` | string | URL recorded in the source snapshot. |
 | `retrieved_at_utc` | TIMESTAMP WITH TIME ZONE | UTC extraction time. |
@@ -142,4 +142,4 @@ Run these checks before publishing processed data:
 
 ## Current source assessment and unresolved decisions
 
-The current files report Brent as EIA data distributed by FRED, FX as SBV central reference rates attributed through Algolab, and domestic prices from PVOIL. The PVOIL page was not independently retrievable during the initial audit, and the FX file uses a secondary source. Record these source confidence limits in the manifest; verify source licenses and confirm zero-price FO semantics before declaring the processed snapshot production-ready.
+The current files report Brent as EIA data distributed by FRED, FX as SBV central reference rates attributed through Algolab, and domestic prices actively from COMECO (https://comeco.vn/) with historical records preserved from PVOIL. The original PVOIL page was not independently retrievable during the initial audit, and the FX file uses a secondary source. Record these source confidence limits in the manifest; verify source licenses and confirm zero-price FO semantics before declaring the processed snapshot production-ready.

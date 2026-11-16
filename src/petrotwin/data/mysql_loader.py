@@ -42,6 +42,11 @@ KNOWN_SERIES: frozenset[str] = frozenset({
     "usd_vnd_sbv_reference",
 })
 
+_DOMESTIC_FUEL_SOURCES: frozenset[str] = frozenset({
+    "comeco",
+    "pvoil",
+})
+
 
 def _sha256(path: Path) -> tuple[str, str]:
     data = path.read_bytes()
@@ -204,8 +209,8 @@ def prepare_bundle(repo: Path | None = None) -> dict[str, Any]:
         source_by_filename[Path(raw_name).name] = source
         source_by_snapshot[source["snapshot_id"]] = source
 
-    if "pvoil" not in source_by_id:
-        raise LoadError("missing required domestic fuel source 'pvoil' in manifest")
+    if not (_DOMESTIC_FUEL_SOURCES & set(source_by_id)):
+        raise LoadError("missing required domestic fuel source ('comeco' or 'pvoil') in manifest")
     if "eia_fred" not in source_by_id:
         raise LoadError("missing required Brent source 'eia_fred' in manifest")
 
@@ -238,8 +243,8 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
     source_by_snapshot = {s["snapshot_id"]: s for s in sources.values()}
     source_by_filename = {Path(s["raw_filename"]).name: s for s in sources.values()}
 
-    if "pvoil" not in sources:
-        raise LoadError("missing required domestic fuel source 'pvoil' in manifest")
+    if not (_DOMESTIC_FUEL_SOURCES & set(sources)):
+        raise LoadError("missing required domestic fuel source ('comeco' or 'pvoil') in manifest")
     if "eia_fred" not in sources:
         raise LoadError("missing required Brent source 'eia_fred' in manifest")
 
@@ -256,6 +261,8 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
     keys = {
         "fuel": set(), "market": set(), "panel": set(), "quarantine": set(),
     }
+    fuel_events: set[tuple[str, str]] = set()
+    panel_events: set[tuple[str, str]] = set()
     for index, row in enumerate(fuel, start=2):
         pid = _nonempty(row.get("product_id"), "product_id", index)
         if pid not in KNOWN_PRODUCTS:
@@ -263,7 +270,15 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
         snap_id = _nonempty(row.get("snapshot_id"), "snapshot_id", index)
         if snap_id not in source_by_snapshot:
             raise LoadError(f"fuel row {index} references an unknown snapshot: {snap_id}")
-        keys["fuel"].add((pid, _nonempty(row.get("effective_at_local"), "effective_at_local", index), snap_id))
+        source_id = _nonempty(row.get("source_id"), "source_id", index)
+        if source_by_snapshot[snap_id]["source_id"] != source_id:
+            raise LoadError(
+                f"fuel row {index}: source provenance mismatch: "
+                f"source_id {source_id!r} does not match snapshot source {source_by_snapshot[snap_id]['source_id']!r}"
+            )
+        effective_at = _nonempty(row.get("effective_at_local"), "effective_at_local", index)
+        keys["fuel"].add((pid, effective_at, snap_id))
+        fuel_events.add((pid, effective_at))
         _date(row.get("source_record_date"), "source_record_date", index)
         _datetime(row.get("effective_at_local"), "effective_at_local", index)
         _date_or_naive_utc(row.get("retrieved_at_utc"), index)
@@ -296,7 +311,7 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
         target_snapshot = _nonempty(row.get("target_snapshot_id"), "target_snapshot_id", index)
         target_source = _nonempty(row.get("target_source_id"), "target_source_id", index)
 
-        # Target provenance check
+        # Target provenance check: observation target_source_id must strictly match snapshot source_id
         target_src_entry = source_by_snapshot.get(target_snapshot)
         if target_src_entry is None:
             raise LoadError(f"panel row {index}: target_snapshot_id {target_snapshot!r} is not in manifest")
@@ -305,8 +320,14 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
                 f"panel row {index}: target provenance mismatch: "
                 f"target_source_id {target_source!r} does not match snapshot source {target_src_entry['source_id']!r}"
             )
+        if (pid, effective_at, target_snapshot) not in keys["fuel"]:
+            raise LoadError(
+                f"panel row {index}: target event ({pid!r}, {effective_at!r}, {target_snapshot!r}) "
+                f"does not reference an existing fuel_price_observation row"
+            )
 
         keys["panel"].add((pid, effective_at, target_snapshot))
+        panel_events.add((pid, effective_at))
         event_dt = _datetime(effective_at, "effective_at_local", index)
         _date(row.get("source_record_date"), "source_record_date", index)
         for field in ("price_value", "price_change_value", "stabilization_fund_subsidy_amount"):
@@ -372,8 +393,12 @@ def validate_bundle(bundle: dict[str, Any]) -> None:
         "quarantine": len(quarantine),
     }.items()):
         raise LoadError("duplicate primary keys detected in accepted outputs")
-    if len(fuel) != len(panel):
-        raise LoadError(f"panel cardinality mismatch: {len(panel)} vs {len(fuel)} fuel events")
+    if len(panel_events) != len(panel):
+        raise LoadError("duplicate (product_id, effective_at_local) event keys detected in panel")
+    if len(panel) != len(fuel_events) or panel_events != fuel_events:
+        raise LoadError(
+            f"panel cardinality mismatch: {len(panel)} panel rows vs {len(fuel_events)} unique fuel events"
+        )
     if len(quarantine) != int(quality.get("integrated", {}).get("quarantined_rows", -1)):
         raise LoadError("quarantine row count differs from quality report")
 

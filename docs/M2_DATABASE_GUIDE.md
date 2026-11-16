@@ -60,7 +60,7 @@ erDiagram
 
 The source refresh is completely automated via the T14 orchestrator (`petrotwin.collectors.runner`) and scheduled via Cron on the server. The workflow guarantees zero manual data entry, atomicity, validation gates, and seamless database pointer transitions:
 
-1. **Automated scheduled collection:** Cron triggers the individual collectors (`brent.py`, `fx.py`, `domestic_fuel.py`) or the full orchestrator `python -m petrotwin.collectors.runner`.
+1. **Automated scheduled collection:** Cron triggers the individual collectors (`brent.py`, `fx.py`, `comeco.py`) or the full orchestrator `python -m petrotwin.collectors.runner`.
 2. **Append-only raw preservation:** New observations are appended atomically to `data/raw/*.csv` with ISO UTC extraction timestamps. Previous raw records are never modified in place.
 3. **Automated validation pipeline:** The orchestrator automatically invokes `src/petrotwin/data/pipeline.py` when new rows are detected. It checks schema fingerprints, keys, temporal order, and leakage constraints (`brent_observation_date < event_date`), generating an immutable run with checksums, manifest, and quality report.
 4. **Automated transactional publication:** If `PETROTWIN_DB_HOST` is configured, the orchestrator executes `src/petrotwin/data/mysql_loader.py --load` in a single ACID transaction.

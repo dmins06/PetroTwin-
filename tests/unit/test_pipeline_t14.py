@@ -249,7 +249,7 @@ data:
         w.writerow(pipeline.EXPECTED_HEADERS[pipeline.FUEL_FILE])
         w.writerow([
             "2026-11-05", "2026-11-05", "15:00", "Xăng RON 95-III", "21000", "21.000 đ", "0",
-            "", "Đồng/lít thực tế", "true", "https://pvoil.com.vn", "2026-11-05T08:00:00Z",
+            "", "Đồng/lít thực tế", "true", "https://comeco.vn/", "2026-11-05T08:00:00Z",
         ])
 
     return raw_dir, processed_dir, log_dir, cfg

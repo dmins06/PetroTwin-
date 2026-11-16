@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -485,7 +486,7 @@ def _setup_disk_repo(tmp_path: Path, include_fx: bool = True, include_brent: boo
     ]
     fuel_rows = [
         ["2026-11-05", "2026-11-05", "15:00", "Xăng RON 95-III", "21000", "21.000 đ", "0",
-         "", "Đồng/lít thực tế", "true", "https://pvoil.com.vn", "2026-11-05T08:00:00Z"]
+         "", "Đồng/lít thực tế", "true", "https://comeco.vn/", "2026-11-05T08:00:00Z"]
     ]
     with fuel_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -526,7 +527,7 @@ def _setup_disk_repo(tmp_path: Path, include_fx: bool = True, include_brent: boo
         w.writerow([
             "gasoline_ron95_iii", "Xăng RON 95-III", "2026-11-05", "2026-11-05T15:00:00+07:00",
             "false", "21000", "VND/liter", "0", "0", "true", "0", "VND/liter",
-            "https://moit.gov.vn/notice1", "pvoil", fuel_hash, "https://pvoil.com.vn",
+            "https://moit.gov.vn/notice1", "comeco", fuel_hash, "https://comeco.vn/",
             "2026-11-05T08:00:00Z", "petrotwin-data-v3"
         ])
 
@@ -567,7 +568,7 @@ def _setup_disk_repo(tmp_path: Path, include_fx: bool = True, include_brent: boo
         w.writerow([
             "gasoline_ron95_iii", "Xăng RON 95-III", "2026-11-05", "2026-11-05T15:00:00+07:00",
             "21000", "0", "0", "0", "VND/liter", "https://moit.gov.vn/notice1", "VND/liter",
-            "pvoil", fuel_hash, "eia_fred", brent_hash, "2026-11-01", "100.5", "4", "USD/bbl",
+            "comeco", fuel_hash, "eia_fred", brent_hash, "2026-11-01", "100.5", "4", "USD/bbl",
             "algolab_sbv_central_rate", (fx_hash if include_fx else ""),
             ("2026-11-01" if include_fx else ""), ("25627" if include_fx else ""),
             ("4" if include_fx else ""), "VND/USD", "petrotwin-data-v3"
@@ -595,8 +596,8 @@ def _setup_disk_repo(tmp_path: Path, include_fx: bool = True, include_brent: boo
         })
     if include_fuel:
         sources_list.append({
-            "snapshot_id": fuel_hash, "source_id": "pvoil", "source_url": "https://pvoil.com.vn",
-            "publisher_or_attribution": "PVOIL", "license_reuse_terms": "terms",
+            "snapshot_id": fuel_hash, "source_id": "comeco", "source_url": "https://comeco.vn/",
+            "publisher_or_attribution": "COMECO", "license_reuse_terms": "terms",
             "retrieved_at_utc": "2026-11-05T08:00:00Z", "raw_filename": "data_price_petro.csv",
             "sha256": fuel_hash, "row_count": 1, "schema_fingerprint_sha256": fuel_fp,
         })
@@ -650,7 +651,7 @@ def test_prepare_bundle_accepts_valid_optional_fx_missing(tmp_path):
     assert bundle["manifest"]["run_id"] == "test_run_1"
     assert "algolab_sbv_central_rate" not in bundle["sources"]
     assert "eia_fred" in bundle["sources"]
-    assert "pvoil" in bundle["sources"]
+    assert "comeco" in bundle["sources"]
     assert bundle["quality"]["publication_status"] == "validated_with_optional_source_missing"
 
 
@@ -662,7 +663,7 @@ def test_prepare_bundle_rejects_missing_required_brent_provenance(tmp_path):
 
 def test_prepare_bundle_rejects_missing_required_fuel_provenance(tmp_path):
     repo = _setup_disk_repo(tmp_path, include_fx=False, include_fuel=False)
-    with pytest.raises(LoadError, match="missing required domestic fuel source 'pvoil' in manifest"):
+    with pytest.raises(LoadError, match="missing required domestic fuel source"):
         prepare_bundle(repo)
 
 
@@ -673,7 +674,7 @@ def test_existing_valid_fx_bundle_remains_accepted(valid_bundle):
     assert valid_bundle["manifest"]["run_id"] == "test_run_1"
     assert set(valid_bundle["sources"]).__contains__("algolab_sbv_central_rate")
     assert "eia_fred" in valid_bundle["sources"]
-    assert "pvoil" in valid_bundle["sources"]
+    assert "comeco" in valid_bundle["sources"]
 
 
 def queue_new_run(db: MockDB, bundle: dict[str, Any], current: dict[str, Any] | None = None) -> None:
@@ -729,3 +730,222 @@ def test_current_pointer_unchanged_when_publish_fails(valid_bundle, monkeypatch)
     assert db.rollback_called == 1
     assert db.commit_called == 0
     assert db.pointer_run_id == "existing_current_run"
+
+
+def test_historical_pvoil_bundle_passes_validation(valid_bundle):
+    """Historical runs with PVOIL source_id must remain valid without alteration."""
+    pvoil_bundle = copy.deepcopy(valid_bundle)
+    # Convert fuel source to historical PVOIL
+    comeco_src = pvoil_bundle["sources"].pop("comeco")
+    comeco_src["source_id"] = "pvoil"
+    comeco_src["publisher_or_attribution"] = "PVOIL"
+    comeco_src["source_url"] = "https://www.pvoil.com.vn/"
+    pvoil_bundle["sources"]["pvoil"] = comeco_src
+    pvoil_bundle["manifest"]["sources"] = list(pvoil_bundle["sources"].values())
+
+    # Both fuel observation and panel target_source_id match PVOIL
+    for row in pvoil_bundle["outputs"]["fuel_price_observation.csv"]:
+        row["source_id"] = "pvoil"
+        row["source_url"] = "https://www.pvoil.com.vn/"
+    for row in pvoil_bundle["outputs"]["fuel_market_panel.csv"]:
+        row["target_source_id"] = "pvoil"
+
+    validate_bundle(pvoil_bundle)
+    assert "pvoil" in pvoil_bundle["sources"]
+
+
+def test_pvoil_observation_linked_to_comeco_snapshot_is_rejected(valid_bundle):
+    """A PVOIL observation linked to a COMECO snapshot must be rejected."""
+    # Case A: in fuel_market_panel.csv
+    bad_panel_bundle = copy.deepcopy(valid_bundle)
+    assert "comeco" in bad_panel_bundle["sources"]
+    for row in bad_panel_bundle["outputs"]["fuel_market_panel.csv"]:
+        row["target_source_id"] = "pvoil"  # Snapshot belongs to 'comeco'
+
+    with pytest.raises(
+        LoadError,
+        match="target provenance mismatch: target_source_id 'pvoil' does not match snapshot source 'comeco'",
+    ):
+        validate_bundle(bad_panel_bundle)
+
+    # Case B: in fuel_price_observation.csv
+    bad_fuel_bundle = copy.deepcopy(valid_bundle)
+    for row in bad_fuel_bundle["outputs"]["fuel_price_observation.csv"]:
+        row["source_id"] = "pvoil"  # Snapshot belongs to 'comeco'
+
+    with pytest.raises(
+        LoadError,
+        match="source provenance mismatch: source_id 'pvoil' does not match snapshot source 'comeco'",
+    ):
+        validate_bundle(bad_fuel_bundle)
+
+
+def test_comeco_observation_linked_to_pvoil_snapshot_is_rejected(valid_bundle):
+    """A COMECO observation linked to a PVOIL snapshot must be rejected."""
+    base_pvoil = copy.deepcopy(valid_bundle)
+    comeco_src = base_pvoil["sources"].pop("comeco")
+    comeco_src["source_id"] = "pvoil"
+    comeco_src["publisher_or_attribution"] = "PVOIL"
+    comeco_src["source_url"] = "https://www.pvoil.com.vn/"
+    base_pvoil["sources"]["pvoil"] = comeco_src
+    base_pvoil["manifest"]["sources"] = list(base_pvoil["sources"].values())
+    for row in base_pvoil["outputs"]["fuel_price_observation.csv"]:
+        row["source_id"] = "pvoil"
+    for row in base_pvoil["outputs"]["fuel_market_panel.csv"]:
+        row["target_source_id"] = "pvoil"
+
+    # Case A: COMECO observation in panel linked to PVOIL snapshot
+    bad_panel = copy.deepcopy(base_pvoil)
+    bad_panel["outputs"]["fuel_market_panel.csv"][0]["target_source_id"] = "comeco"
+    with pytest.raises(
+        LoadError,
+        match="target provenance mismatch: target_source_id 'comeco' does not match snapshot source 'pvoil'",
+    ):
+        validate_bundle(bad_panel)
+
+    # Case B: COMECO observation in fuel_price_observation linked to PVOIL snapshot
+    bad_fuel = copy.deepcopy(base_pvoil)
+    bad_fuel["outputs"]["fuel_price_observation.csv"][0]["source_id"] = "comeco"
+    with pytest.raises(
+        LoadError,
+        match="source provenance mismatch: source_id 'comeco' does not match snapshot source 'pvoil'",
+    ):
+        validate_bundle(bad_fuel)
+
+
+def test_mixed_source_bundle_with_source_specific_snapshots_passes_validation(valid_bundle):
+    """A mixed-source run with distinct PVOIL and COMECO snapshots in manifest passes validation when each observation links to its matching snapshot."""
+    mixed_bundle = copy.deepcopy(valid_bundle)
+    comeco_snap = mixed_bundle["sources"]["comeco"]["snapshot_id"]
+    pvoil_snap = "b" * 64
+
+    # Add PVOIL source snapshot to manifest & sources
+    pvoil_src = copy.deepcopy(mixed_bundle["sources"]["comeco"])
+    pvoil_src["source_id"] = "pvoil"
+    pvoil_src["snapshot_id"] = pvoil_snap
+    pvoil_src["sha256"] = pvoil_snap
+    pvoil_src["raw_filename"] = "data_price_petro.csv"
+    pvoil_src["source_url"] = "https://pvoil.com.vn/tin-gia-xang-dau"
+    pvoil_src["publisher_or_attribution"] = "PVOIL"
+    mixed_bundle["sources"]["pvoil"] = pvoil_src
+    mixed_bundle["manifest"]["sources"].append(pvoil_src)
+
+    # Keep COMECO row pointing to COMECO snapshot, add PVOIL row pointing to PVOIL snapshot
+    pvoil_fuel_row = copy.deepcopy(mixed_bundle["outputs"]["fuel_price_observation.csv"][0])
+    pvoil_fuel_row["effective_at_local"] = "2026-10-22T15:00:00+07:00"
+    pvoil_fuel_row["source_record_date"] = "2026-10-22"
+    pvoil_fuel_row["source_id"] = "pvoil"
+    pvoil_fuel_row["snapshot_id"] = pvoil_snap
+    pvoil_fuel_row["source_url"] = "https://pvoil.com.vn/tin-gia-xang-dau"
+    mixed_bundle["outputs"]["fuel_price_observation.csv"].append(pvoil_fuel_row)
+
+    pvoil_panel_row = copy.deepcopy(mixed_bundle["outputs"]["fuel_market_panel.csv"][0])
+    pvoil_panel_row["effective_at_local"] = "2026-10-22T15:00:00+07:00"
+    pvoil_panel_row["source_record_date"] = "2026-10-22"
+    pvoil_panel_row["target_source_id"] = "pvoil"
+    pvoil_panel_row["target_snapshot_id"] = pvoil_snap
+    # Clear market features since 2026-10-22 is before 2026-11-01 brent/fx in fixture
+    pvoil_panel_row["brent_snapshot_id"] = ""
+    pvoil_panel_row["brent_observation_date"] = ""
+    pvoil_panel_row["brent_usd_per_barrel"] = ""
+    pvoil_panel_row["brent_age_days"] = ""
+    pvoil_panel_row["fx_snapshot_id"] = ""
+    pvoil_panel_row["fx_observation_date"] = ""
+    pvoil_panel_row["usd_vnd_rate"] = ""
+    pvoil_panel_row["fx_age_days"] = ""
+    mixed_bundle["outputs"]["fuel_market_panel.csv"].append(pvoil_panel_row)
+
+    mixed_bundle["quality"]["outputs"]["fuel_price_observation.csv"]["rows"] = 2
+    mixed_bundle["quality"]["outputs"]["fuel_market_panel.csv"]["rows"] = 2
+
+    validate_bundle(mixed_bundle)
+    assert mixed_bundle["outputs"]["fuel_market_panel.csv"][0]["target_snapshot_id"] == comeco_snap
+    assert mixed_bundle["outputs"]["fuel_market_panel.csv"][1]["target_snapshot_id"] == pvoil_snap
+
+
+def test_mysql_loader_accepts_and_publishes_multiple_source_observations_for_single_event(valid_bundle, monkeypatch):
+    """When PVOIL and COMECO both report identical observations for the same (product_id, effective_at_local),
+    fuel_price_observation.csv has 2 rows (with distinct snapshots) while fuel_market_panel.csv has 1 row.
+    Both validate_bundle() and publish() must accept and persist this relationship."""
+    monkeypatch.setenv("PETROTWIN_DB_PASSWORD", "mock_pass")
+    bundle = copy.deepcopy(valid_bundle)
+    comeco_snap = bundle["sources"]["comeco"]["snapshot_id"]
+    pvoil_snap = "c" * 64
+
+    # Add PVOIL source snapshot to manifest & sources
+    pvoil_src = copy.deepcopy(bundle["sources"]["comeco"])
+    pvoil_src["source_id"] = "pvoil"
+    pvoil_src["snapshot_id"] = pvoil_snap
+    pvoil_src["sha256"] = pvoil_snap
+    pvoil_src["raw_filename"] = "data_price_petro.csv"
+    pvoil_src["source_url"] = "https://pvoil.com.vn/tin-gia-xang-dau"
+    pvoil_src["publisher_or_attribution"] = "PVOIL"
+    bundle["sources"]["pvoil"] = pvoil_src
+    bundle["manifest"]["sources"].append(pvoil_src)
+
+    # Add a second observation for the EXACT SAME (product_id, effective_at_local) from PVOIL
+    pvoil_fuel_row = copy.deepcopy(bundle["outputs"]["fuel_price_observation.csv"][0])
+    pvoil_fuel_row["source_id"] = "pvoil"
+    pvoil_fuel_row["snapshot_id"] = pvoil_snap
+    pvoil_fuel_row["source_url"] = "https://pvoil.com.vn/tin-gia-xang-dau"
+    bundle["outputs"]["fuel_price_observation.csv"].append(pvoil_fuel_row)
+
+    # fuel_price_observation.csv now has 2 rows, while fuel_market_panel.csv has 1 row!
+    assert len(bundle["outputs"]["fuel_price_observation.csv"]) == 2
+    assert len(bundle["outputs"]["fuel_market_panel.csv"]) == 1
+    bundle["quality"]["outputs"]["fuel_price_observation.csv"]["rows"] = 2
+    bundle["manifest"]["outputs"]["fuel_price_observation.csv"]["rows"] = 2
+
+    # 1. Offline validation passes
+    validate_bundle(bundle)
+
+    # 2. Transactional publish inserts 2 fuel_price_observation rows and 1 fuel_market_panel row
+    db = MockDB()
+    queue_new_run(db, bundle)
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: MockConnection(db))
+
+    msg = publish(bundle)
+    assert "fuel=2" in msg
+    assert "panel=1" in msg
+    assert db.commit_called == 1
+
+
+def test_publish_idempotent_when_already_published(valid_bundle, monkeypatch):
+    """When a run is already published and reconciling, publishing again is idempotent."""
+    monkeypatch.setenv("PETROTWIN_DB_PASSWORD", "mock_pass")
+    db = MockDB()
+    manifest = valid_bundle["manifest"]
+    quality = valid_bundle["quality"]
+    # Mock existing dataset_run
+    db.fetchone_queue.append({
+        "run_id": manifest["run_id"],
+        "schema_version": manifest["schema_version"],
+        "pipeline_version": manifest["pipeline_version"],
+        "pipeline_sha256": manifest["pipeline_sha256"],
+        "publication_status": quality["publication_status"],
+        "manifest_json": json.dumps(manifest),
+    })
+    # Mock existing quality_report
+    db.fetchone_queue.append({
+        "report_json": json.dumps(quality),
+    })
+    # Mock existing snapshots
+    db.fetchall_queue.append([
+        {"snapshot_id": s["snapshot_id"]} for s in valid_bundle["sources"].values()
+    ])
+    # Mock table count reconciliations
+    outputs = valid_bundle["outputs"]
+    for table, count in [
+        ("fuel_price_observation", len(outputs["fuel_price_observation.csv"])),
+        ("market_observation", len(outputs["market_observation.csv"])),
+        ("fuel_market_panel", len(outputs["fuel_market_panel.csv"])),
+        ("quarantine_record", len(outputs["quarantine.csv"])),
+        ("fund_annotation", len(valid_bundle["annotations"])),
+    ]:
+        db.fetchone_queue.append({"n": count})
+
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: MockConnection(db))
+
+    message = publish(valid_bundle)
+    assert "already exists and its data/metadata reconcile; no rows changed" in message
+    assert db.rollback_called == 1

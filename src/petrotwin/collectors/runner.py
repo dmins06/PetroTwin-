@@ -1,6 +1,6 @@
 """Orchestration runner: fetch all data sources then run pipeline and loader.
 
-Calls collector modules in sequence (brent → fx → domestic_fuel), optionally
+Calls collector modules in sequence (brent → fx → comeco), optionally
 runs ``petrotwin.data.pipeline`` and ``petrotwin.data.mysql_loader``, and writes
 a structured JSON log entry to ``logs/collector_run.log``.
 
@@ -417,12 +417,12 @@ def main() -> None:
         else:
             brent_rows, brent_err = run_configured("petrotwin.collectors.brent", "brent")
             fx_rows, fx_err = run_configured("petrotwin.collectors.fx", "fx")
-            fuel_rows, fuel_err = run_configured("petrotwin.collectors.domestic_fuel", "domestic_fuel")
+            fuel_rows, fuel_err = run_configured("petrotwin.collectors.comeco", "comeco")
 
             collector_results = {
                 "brent": (brent_rows, brent_err, collector_is_optional("brent")),
                 "fx": (fx_rows, fx_err, collector_is_optional("fx")),
-                "domestic_fuel": (fuel_rows, fuel_err, collector_is_optional("domestic_fuel")),
+                "comeco": (fuel_rows, fuel_err, collector_is_optional("comeco")),
             }
             required_collector_failed = any(
                 rows == -1 and not optional for rows, _error, optional in collector_results.values()

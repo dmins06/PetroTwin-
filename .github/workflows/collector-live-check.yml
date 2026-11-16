@@ -1,0 +1,866 @@
+name: Collector Live Check (Isolated Read-Only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: petrotwin-collector-live-check-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  collector-live-check:
+    name: Isolated Live Check (COMECO -> Brent -> FX)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      PYTHONUTF8: "1"
+      GITHUB_REF_NAME: ${{ github.ref_name }}
+      PETROTWIN_DB_HOST: ""
+      PETROTWIN_DB_USER: ""
+      PETROTWIN_DB_PASSWORD: ""
+      PETROTWIN_ENV_FILE: "/dev/null"
+      FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+
+    steps:
+      - name: Checkout repository (read-only credentials)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          persist-credentials: false
+
+      - name: Preflight branch and module guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_NAME:-}" != "feature/comeco-collector" ]; then
+            echo "::error::Branch guard failed: collector-live-check is only permitted on 'feature/comeco-collector' (current ref: '${GITHUB_REF_NAME:-unknown}')."
+            exit 1
+          fi
+          if [ ! -f "src/petrotwin/collectors/comeco.py" ]; then
+            echo "::error::Module guard failed: src/petrotwin/collectors/comeco.py does not exist on ref '${GITHUB_REF_NAME}'."
+            exit 1
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[collectors,mysql]"
+
+      - name: Run isolated live collector & preflight verification (COMECO -> Brent -> FX)
+        id: verify
+        shell: bash
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import csv
+          import hashlib
+          import json
+          import os
+          import re
+          import shutil
+          import stat
+          import subprocess
+          import sys
+          import tempfile
+          from datetime import date
+          from decimal import Decimal, InvalidOperation
+          from pathlib import Path
+          from urllib.parse import urlparse
+
+          from petrotwin.collectors.comeco import TARGET_CANONICAL_PRODUCTS
+          from petrotwin.data.pipeline import PRODUCT_IDS, _parse_effective_at
+
+          repo_root = Path.cwd().resolve()
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+
+          EXPECTED_BRANCH = "feature/comeco-collector"
+          EXPECTED_PVOIL_SHA256 = "5a3e432d6c844e66353b4a5108b65e6137f08910fe360a6687fa0f209b737c87"
+          EXPECTED_COMECO_PRODUCTS = {
+              name: PRODUCT_IDS[name] for name in sorted(TARGET_CANONICAL_PRODUCTS)
+          }
+          EXPECTED_COMECO_PRODUCT_IDS = set(EXPECTED_COMECO_PRODUCTS.values())
+
+          def sha256_file(path: Path) -> str:
+              h = hashlib.sha256()
+              with path.open("rb") as f:
+                  for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                      h.update(chunk)
+              return h.hexdigest()
+
+          def read_csv_rows(path: Path) -> list[dict[str, str]]:
+              if not path.is_file():
+                  return []
+              with path.open("r", encoding="utf-8-sig", newline="") as f:
+                  return list(csv.DictReader(f))
+
+          def parse_json_lines(text: str) -> list[dict]:
+              events = []
+              for line in (text or "").splitlines():
+                  line = line.strip()
+                  if not line:
+                      continue
+                  try:
+                      obj = json.loads(line)
+                      if isinstance(obj, dict):
+                          events.append(obj)
+                  except Exception:
+                      pass
+              return events
+
+          def is_valid_comeco_url(url_text: str) -> bool:
+              try:
+                  parsed = urlparse((url_text or "").strip())
+                  host = (parsed.hostname or "").lower()
+                  return parsed.scheme in {"http", "https"} and (
+                      host == "comeco.vn" or host.endswith(".comeco.vn")
+                  )
+              except Exception:
+                  return False
+
+          def is_valid_pvoil_url(url_text: str) -> bool:
+              try:
+                  parsed = urlparse((url_text or "").strip())
+                  host = (parsed.hostname or "").lower()
+                  return parsed.scheme in {"http", "https"} and (
+                      host == "pvoil.com.vn" or host.endswith(".pvoil.com.vn")
+                  )
+              except Exception:
+                  return False
+
+          def validate_comeco_raw_to_processed(
+              raw_rows: list[dict[str, str]],
+              processed_rows: list[dict[str, str]],
+              expected_comeco_snapshot_id: str | None,
+          ) -> list[str]:
+              """Validate 1-to-1 field-level integrity between raw comeco_fuel_prices.csv and processed fuel_price_observation.csv."""
+              errors: list[str] = []
+              if not raw_rows:
+                  return ["raw comeco_fuel_prices.csv contains 0 observations"]
+              if not expected_comeco_snapshot_id:
+                  errors.append("missing expected comeco snapshot_id in manifest.json")
+
+              expected_by_key: dict[tuple[str, str], dict[str, object]] = {}
+              for idx, raw in enumerate(raw_rows, start=2):
+                  p_name = (raw.get("product_name") or "").strip()
+                  pid = PRODUCT_IDS.get(p_name)
+                  if not pid or p_name not in TARGET_CANONICAL_PRODUCTS:
+                      errors.append(f"raw COMECO row {idx}: unmapped or disallowed product_name {p_name!r}")
+                      continue
+
+                  eff_date_str = (raw.get("effective_date") or "").strip()
+                  eff_time_str = (raw.get("effective_time") or "").strip()
+                  try:
+                      eff_at_local, normalized_24 = _parse_effective_at(
+                          eff_date_str, eff_time_str, "comeco_fuel_prices.csv", idx
+                      )
+                  except Exception as exc:
+                      errors.append(f"raw COMECO row {idx}: invalid effective timestamp ({eff_date_str!r}, {eff_time_str!r}): {exc}")
+                      continue
+
+                  price_raw = (raw.get("price_vnd_per_liter") or "").strip()
+                  try:
+                      price_dec = Decimal(price_raw)
+                      if not price_dec.is_finite() or price_dec <= Decimal(1000):
+                          errors.append(f"raw COMECO row {idx}: invalid or non-positive price {price_raw!r}")
+                          continue
+                  except (InvalidOperation, ValueError):
+                      errors.append(f"raw COMECO row {idx}: non-numeric price {price_raw!r}")
+                      continue
+
+                  src_url = (raw.get("source_url") or "").strip()
+                  if not is_valid_comeco_url(src_url):
+                      errors.append(f"raw COMECO row {idx}: invalid COMECO source_url {src_url!r}")
+                      continue
+
+                  key = (pid, eff_at_local)
+                  if key in expected_by_key:
+                      errors.append(f"raw COMECO row {idx}: duplicate raw COMECO observation key {key!r}")
+                      continue
+
+                  expected_by_key[key] = {
+                      "raw_row_number": idx,
+                      "product_id": pid,
+                      "source_product_name": p_name,
+                      "effective_at_local": eff_at_local,
+                      "effective_time_24_00_normalized": str(normalized_24).lower(),
+                      "price_decimal": price_dec,
+                      "source_url": src_url,
+                  }
+
+              # Partition processed observations strictly by source_id; never count PVOIL rows as COMECO
+              comeco_proc_by_key: dict[tuple[str, str], list[tuple[int, dict[str, str]]]] = {}
+              comeco_proc_count = 0
+              for proc_idx, proc in enumerate(processed_rows, start=2):
+                  src_id = (proc.get("source_id") or "").strip()
+                  if src_id == "pvoil":
+                      continue
+                  if src_id != "comeco":
+                      errors.append(f"processed fuel row {proc_idx}: unexpected source_id {src_id!r}")
+                      continue
+                  comeco_proc_count += 1
+                  key = ((proc.get("product_id") or "").strip(), (proc.get("effective_at_local") or "").strip())
+                  comeco_proc_by_key.setdefault(key, []).append((proc_idx, proc))
+
+              if comeco_proc_count != len(raw_rows):
+                  errors.append(
+                      f"COMECO observation cardinality mismatch: raw={len(raw_rows)}, processed_comeco={comeco_proc_count}"
+                  )
+
+              # Check for unexpected or duplicate processed COMECO observations
+              for key, matches in comeco_proc_by_key.items():
+                  if len(matches) > 1:
+                      rows_str = ", ".join(str(m[0]) for m in matches)
+                      errors.append(f"duplicate processed COMECO observations for key {key!r} at rows [{rows_str}]")
+                  if key not in expected_by_key:
+                      proc_idx, proc = matches[0]
+                      errors.append(
+                          f"unexpected processed COMECO observation at row {proc_idx} with key {key!r} "
+                          f"(source_product_name={proc.get('source_product_name')!r})"
+                      )
+
+              # Verify every expected raw COMECO observation has 1 exact field-level match in processed rows
+              for key, exp in expected_by_key.items():
+                  matches = comeco_proc_by_key.get(key, [])
+                  if not matches:
+                      errors.append(
+                          f"missing processed COMECO observation for raw row {exp['raw_row_number']} key {key!r}"
+                      )
+                      continue
+                  proc_idx, proc = matches[0]
+                  if (proc.get("source_id") or "").strip() != "comeco":
+                      errors.append(f"processed row {proc_idx}: expected source_id 'comeco', got {proc.get('source_id')!r}")
+                  if (proc.get("product_id") or "").strip() != exp["product_id"]:
+                      errors.append(
+                          f"processed row {proc_idx}: product_id mismatch: got {proc.get('product_id')!r}, expected {exp['product_id']!r}"
+                      )
+                  if (proc.get("source_product_name") or "").strip() != exp["source_product_name"]:
+                      errors.append(
+                          f"processed row {proc_idx}: source_product_name mismatch: got {proc.get('source_product_name')!r}, expected {exp['source_product_name']!r}"
+                      )
+                  if (proc.get("effective_at_local") or "").strip() != exp["effective_at_local"]:
+                      errors.append(
+                          f"processed row {proc_idx}: effective_at_local mismatch: got {proc.get('effective_at_local')!r}, expected {exp['effective_at_local']!r}"
+                      )
+                  if (proc.get("effective_time_24_00_normalized") or "").strip().lower() != exp["effective_time_24_00_normalized"]:
+                      errors.append(
+                          f"processed row {proc_idx}: effective_time_24_00_normalized mismatch: "
+                          f"got {proc.get('effective_time_24_00_normalized')!r}, expected {exp['effective_time_24_00_normalized']!r}"
+                      )
+                  proc_price_str = (proc.get("price_value") or "").strip()
+                  try:
+                      proc_price_dec = Decimal(proc_price_str)
+                      if not proc_price_dec.is_finite() or proc_price_dec != exp["price_decimal"]:
+                          errors.append(
+                              f"processed row {proc_idx}: price_value mismatch for {key!r}: "
+                              f"got {proc_price_str!r}, expected {str(exp['price_decimal'])!r}"
+                          )
+                  except (InvalidOperation, ValueError):
+                      errors.append(f"processed row {proc_idx}: invalid processed price_value {proc_price_str!r}")
+
+                  proc_url = (proc.get("source_url") or "").strip()
+                  if proc_url != exp["source_url"] or not is_valid_comeco_url(proc_url):
+                      errors.append(
+                          f"processed row {proc_idx}: source_url mismatch: got {proc_url!r}, expected {exp['source_url']!r}"
+                      )
+
+                  proc_snap = (proc.get("snapshot_id") or "").strip()
+                  if expected_comeco_snapshot_id and proc_snap != expected_comeco_snapshot_id:
+                      errors.append(
+                          f"processed row {proc_idx}: snapshot_id mismatch: got {proc_snap!r}, expected {expected_comeco_snapshot_id!r}"
+                      )
+
+              return errors
+
+          def run_cmd(args: list[str], env: dict[str, str], timeout: int = 120) -> tuple[int, str, str, list[dict]]:
+              try:
+                  proc = subprocess.run(
+                      args,
+                      cwd=repo_root,
+                      env=env,
+                      capture_output=True,
+                      text=True,
+                      encoding="utf-8",
+                      timeout=timeout,
+                  )
+                  out = proc.stdout or ""
+                  err = proc.stderr or ""
+                  if out.strip():
+                      print(out, end="" if out.endswith("\n") else "\n", flush=True)
+                  if err.strip():
+                      print(err, file=sys.stderr, end="" if err.endswith("\n") else "\n", flush=True)
+                  return proc.returncode, out, err, parse_json_lines(out)
+              except subprocess.TimeoutExpired as exc:
+                  out = (exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or ""))
+                  err = (exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or ""))
+                  timeout_msg = f"Command timed out after {timeout} seconds: {' '.join(args)}"
+                  err = f"{err}\n{timeout_msg}".strip()
+                  if out.strip():
+                      print(out, end="" if out.endswith("\n") else "\n", flush=True)
+                  print(err, file=sys.stderr, flush=True)
+                  return 124, out, err, parse_json_lines(out)
+
+          tmp_root: Path | None = None
+          exit_code = 1
+          overall_result = "FAILED"
+          unexpected_error: str | None = None
+          pvoil_preserved = False
+          pvoil_before_rows = 0
+          pipe_rc = -1
+          loader_rc = -1
+          manifest_sources: dict[str, str] = {}
+          fuel_obs_by_source: dict[str, int] = {}
+          panel_row_count = 0
+
+          report: dict[str, dict] = {
+              "comeco": {
+                  "name": "COMECO Domestic Fuel",
+                  "required": True,
+                  "status": "NOT TESTED",
+                  "exit_code": None,
+                  "http_or_source_status": "NOT_RUN",
+                  "retrieved_rows": None,
+                  "appended_rows": 0,
+                  "total_rows": 0,
+                  "latest_effective_or_obs_date": None,
+                  "mapped_products": [],
+                  "output_path": None,
+                  "failure_reason": "Not executed",
+              },
+              "brent": {
+                  "name": "Brent (EIA/FRED)",
+                  "required": True,
+                  "status": "NOT TESTED",
+                  "exit_code": None,
+                  "http_or_source_status": "NOT_RUN",
+                  "retrieved_rows": None,
+                  "appended_rows": 0,
+                  "total_rows": 0,
+                  "latest_effective_or_obs_date": None,
+                  "output_path": None,
+                  "failure_reason": "Not executed",
+              },
+              "fx": {
+                  "name": "USD/VND FX (Algolab SBV)",
+                  "required": False,
+                  "status": "NOT TESTED",
+                  "exit_code": None,
+                  "http_or_source_status": "NOT_RUN",
+                  "retrieved_rows": None,
+                  "appended_rows": 0,
+                  "total_rows": 0,
+                  "latest_effective_or_obs_date": None,
+                  "output_path": None,
+                  "failure_reason": "Not executed",
+              },
+          }
+
+          try:
+              # ===============================================================
+              # 0. BRANCH, MODULE & WORKTREE BASELINE GUARD
+              # ===============================================================
+              current_ref = os.environ.get("GITHUB_REF_NAME", "").strip()
+              if current_ref != EXPECTED_BRANCH:
+                  raise RuntimeError(
+                      f"Branch safety guard failed: expected {EXPECTED_BRANCH!r}, got {current_ref!r}"
+                  )
+              comeco_module_path = repo_root / "src" / "petrotwin" / "collectors" / "comeco.py"
+              if not comeco_module_path.is_file():
+                  raise RuntimeError(f"Missing required collector module: {comeco_module_path}")
+
+              git_status_before = subprocess.check_output(
+                  ["git", "status", "--porcelain"], cwd=repo_root, text=True
+              )
+
+              tmp_root = Path(tempfile.mkdtemp(prefix="petrotwin_live_check_"))
+              tmp_raw = tmp_root / "data" / "raw"
+              tmp_manual = tmp_root / "data" / "manual"
+              tmp_processed = tmp_root / "data" / "processed"
+              tmp_logs = tmp_root / "logs"
+              tmp_locks = tmp_logs / "locks"
+              tmp_locks.mkdir(parents=True, exist_ok=True)
+
+              shutil.copytree(repo_root / "data" / "raw", tmp_raw)
+              shutil.copytree(repo_root / "data" / "manual", tmp_manual)
+
+              # Lock historical PVOIL file as read-only baseline so it can never be modified
+              pvoil_tmp_csv = tmp_raw / "data_price_petro.csv"
+              pvoil_tmp_csv.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+              pvoil_before_sha = sha256_file(pvoil_tmp_csv)
+              pvoil_before_rows = len(read_csv_rows(pvoil_tmp_csv))
+
+              brent_tmp_csv = tmp_raw / "brent_crude_prices.csv"
+              fx_tmp_csv = tmp_raw / "usd_vnd_rates.csv"
+              comeco_tmp_csv = tmp_raw / "comeco_fuel_prices.csv"
+              if comeco_tmp_csv.exists():
+                  comeco_tmp_csv.unlink()
+
+              brent_before_rows_list = read_csv_rows(brent_tmp_csv)
+              brent_before_rows = len(brent_before_rows_list)
+              brent_before_max_date = max(
+                  (date.fromisoformat(r["date"]) for r in brent_before_rows_list if r.get("date")),
+                  default=None,
+              )
+              fx_before_rows = len(read_csv_rows(fx_tmp_csv))
+              comeco_before_rows = 0
+
+              env = os.environ.copy()
+              env["PETROTWIN_DATA_DIR"] = str(tmp_raw)
+              env["PETROTWIN_LOCK_DIR"] = str(tmp_locks)
+              env["PETROTWIN_DB_HOST"] = ""
+              env["PETROTWIN_DB_USER"] = ""
+              env["PETROTWIN_DB_PASSWORD"] = ""
+              env["PETROTWIN_ENV_FILE"] = "/dev/null"
+
+              # ===============================================================
+              # 1. COMECO DOMESTIC FUEL COLLECTOR (Required)
+              # ===============================================================
+              print("=== [1/3] Running COMECO Domestic Fuel Collector (--check-only then live) ===")
+              chk_rc, chk_out, chk_err, chk_events = run_cmd(
+                  [sys.executable, "-m", "petrotwin.collectors.comeco", "--check-only"], env=env
+              )
+              chk_info = chk_events[-1] if chk_events else {}
+              check_only_untouched = not comeco_tmp_csv.exists()
+
+              comeco_rc, comeco_out, comeco_err, comeco_events = run_cmd(
+                  [sys.executable, "-m", "petrotwin.collectors.comeco"], env=env
+              )
+              comeco_after_rows = read_csv_rows(comeco_tmp_csv)
+              comeco_appended = len(comeco_after_rows) - comeco_before_rows
+              comeco_stale_ev = next((e for e in reversed(comeco_events) if e.get("event") == "source_stale"), None)
+              comeco_err_ev = next(
+                  (e for e in reversed(comeco_events) if e.get("event") in {"fetch_error", "parse_error", "write_error"}),
+                  {},
+              )
+
+              # Second run to verify idempotency: requires up_to_date event, new_rows == 0, and unchanged row count
+              idempotent_ok = False
+              idempotent_reason = None
+              if comeco_rc == 0 and len(comeco_after_rows) == 4:
+                  idem_rc, _, idem_err, idem_events = run_cmd(
+                      [sys.executable, "-m", "petrotwin.collectors.comeco"], env=env
+                  )
+                  idem_up_to_date = next((e for e in reversed(idem_events) if e.get("event") == "up_to_date"), None)
+                  idem_rows_after = len(read_csv_rows(comeco_tmp_csv))
+                  if idem_rc != 0:
+                      idempotent_reason = f"Second COMECO run failed with exit code {idem_rc}: {idem_err.strip()}"
+                  elif idem_up_to_date is None or idem_up_to_date.get("new_rows") != 0:
+                      idempotent_reason = f"Second COMECO run did not emit up_to_date with new_rows=0: {idem_events}"
+                  elif idem_rows_after != 4:
+                      idempotent_reason = f"Second COMECO run modified row count from 4 to {idem_rows_after}"
+                  else:
+                      idempotent_ok = True
+
+              observed_products = [r.get("product_name", "") for r in comeco_after_rows]
+              eff_dates = sorted({f"{r.get('effective_date', '')} {r.get('effective_time', '')}".strip() for r in comeco_after_rows})
+
+              # Validate every COMECO row in detail
+              chk_prices = {
+                  p["product_name"]: int(p["price"])
+                  for p in chk_info.get("products", [])
+                  if isinstance(p, dict) and "product_name" in p and "price" in p
+              }
+              row_validation_error = None
+              for idx, r in enumerate(comeco_after_rows, start=2):
+                  p_name = (r.get("product_name") or "").strip()
+                  if p_name not in EXPECTED_COMECO_PRODUCTS:
+                      row_validation_error = f"COMECO row {idx}: unexpected product {p_name!r}"
+                      break
+                  try:
+                      price_int = int((r.get("price_vnd_per_liter") or "").strip())
+                  except ValueError:
+                      row_validation_error = f"COMECO row {idx}: non-integer price {r.get('price_vnd_per_liter')!r}"
+                      break
+                  if price_int <= 1000:
+                      row_validation_error = f"COMECO row {idx}: price {price_int} <= 1000 VND/liter"
+                      break
+                  if p_name in chk_prices and price_int != chk_prices[p_name]:
+                      row_validation_error = (
+                          f"COMECO row {idx}: price {price_int} for {p_name!r} disagrees with --check-only price {chk_prices[p_name]}"
+                      )
+                      break
+                  eff_d = (r.get("effective_date") or "").strip()
+                  eff_t = (r.get("effective_time") or "").strip()
+                  try:
+                      date.fromisoformat(eff_d)
+                  except ValueError:
+                      row_validation_error = f"COMECO row {idx}: invalid effective_date {eff_d!r}"
+                      break
+                  if not re.fullmatch(r"\d{2}:\d{2}", eff_t):
+                      row_validation_error = f"COMECO row {idx}: invalid effective_time {eff_t!r}"
+                      break
+                  if eff_d != chk_info.get("effective_date") or eff_t != chk_info.get("effective_time"):
+                      row_validation_error = (
+                          f"COMECO row {idx}: timestamp ({eff_d} {eff_t}) disagrees with --check-only "
+                          f"({chk_info.get('effective_date')} {chk_info.get('effective_time')})"
+                      )
+                      break
+                  src_url = (r.get("source_url") or "").strip()
+                  if not is_valid_comeco_url(src_url):
+                      row_validation_error = f"COMECO row {idx}: invalid or non-comeco.vn source_url {src_url!r}"
+                      break
+
+              comeco_failure_reason = None
+              if not check_only_untouched:
+                  comeco_failure_reason = "--check-only modified or created comeco_fuel_prices.csv"
+              elif chk_rc != 0 or chk_info.get("event") != "check_only_success":
+                  comeco_failure_reason = f"--check-only failed: {chk_info.get('error') or chk_err.strip() or chk_rc}"
+              elif comeco_rc != 0:
+                  comeco_failure_reason = comeco_err_ev.get("error") or comeco_err.strip() or f"Exited with code {comeco_rc}"
+              elif comeco_stale_ev is not None:
+                  comeco_failure_reason = (
+                      f"source_stale: COMECO announcement effective_date={comeco_stale_ev.get('effective_date')} "
+                      f"is {comeco_stale_ev.get('days_since_announcement')} days old "
+                      f"(max_age_days={comeco_stale_ev.get('max_age_days')}); 0 observations written"
+                  )
+              elif comeco_appended != 4 or len(comeco_after_rows) != 4:
+                  comeco_failure_reason = (
+                      f"Expected exactly 4 newly collected COMECO observations, got appended={comeco_appended}, total={len(comeco_after_rows)}"
+                  )
+              elif len(set(observed_products)) != 4 or set(observed_products) != set(EXPECTED_COMECO_PRODUCTS.keys()):
+                  comeco_failure_reason = (
+                      f"Product mapping mismatch: got {sorted(observed_products)}, expected {sorted(EXPECTED_COMECO_PRODUCTS.keys())}"
+                  )
+              elif row_validation_error is not None:
+                  comeco_failure_reason = row_validation_error
+              elif not idempotent_ok:
+                  comeco_failure_reason = idempotent_reason or "Repeated COMECO execution was not idempotent"
+
+              comeco_pass = comeco_failure_reason is None
+              report["comeco"] = {
+                  "name": "COMECO Domestic Fuel",
+                  "required": True,
+                  "status": "PASS" if comeco_pass else "FAIL",
+                  "exit_code": comeco_rc,
+                  "http_or_source_status": (
+                      f"HTTP {comeco_err_ev.get('status_code')}" if comeco_err_ev.get("status_code")
+                      else ("STALE (200)" if comeco_stale_ev else ("OK (200)" if comeco_rc == 0 else "ERROR"))
+                  ),
+                  "retrieved_rows": chk_info.get("products_count", len(comeco_after_rows) if comeco_rc == 0 else None),
+                  "appended_rows": comeco_appended,
+                  "total_rows": len(comeco_after_rows),
+                  "latest_effective_or_obs_date": (
+                      eff_dates[-1] if eff_dates
+                      else (f"{chk_info.get('effective_date')} {chk_info.get('effective_time')}" if chk_info.get("effective_date") else None)
+                  ),
+                  "mapped_products": sorted(set(observed_products)),
+                  "output_path": str(comeco_tmp_csv),
+                  "failure_reason": comeco_failure_reason,
+              }
+
+              # ===============================================================
+              # 2. BRENT COLLECTOR (Required)
+              # ===============================================================
+              print("=== [2/3] Running Brent Collector ===")
+              brent_rc, brent_out, brent_err, brent_events = run_cmd(
+                  [sys.executable, "-m", "petrotwin.collectors.brent"], env=env
+              )
+              brent_after_rows = read_csv_rows(brent_tmp_csv)
+              brent_appended = len(brent_after_rows) - brent_before_rows
+              brent_fetch_ev = next((e for e in reversed(brent_events) if e.get("event") == "fetch_done"), None)
+              brent_done_ev = next(
+                  (e for e in reversed(brent_events) if e.get("event") in {"collector_done", "up_to_date"}),
+                  None,
+              )
+              brent_err_ev = next(
+                  (e for e in reversed(brent_events) if e.get("event") in {"fetch_error", "write_error"}),
+                  {},
+              )
+              brent_last_date = max((r["date"] for r in brent_after_rows if r.get("date")), default=None)
+
+              brent_new_rows = brent_after_rows[brent_before_rows:] if brent_appended > 0 else []
+              brent_rows_valid = True
+              brent_validation_err = None
+              for idx, r in enumerate(brent_new_rows, start=brent_before_rows + 2):
+                  try:
+                      obs_d = date.fromisoformat((r.get("date") or "").strip())
+                      if brent_before_max_date is not None and obs_d <= brent_before_max_date:
+                          brent_rows_valid = False
+                          brent_validation_err = f"New Brent row {idx} date {obs_d} is not newer than baseline {brent_before_max_date}"
+                          break
+                      status = (r.get("observation_status") or "").strip()
+                      val_str = (r.get("price_usd_per_barrel") or "").strip()
+                      if status == "observed":
+                          if not val_str or Decimal(val_str) <= 0:
+                              brent_rows_valid = False
+                              brent_validation_err = f"New Brent row {idx} has non-positive observed price {val_str!r}"
+                              break
+                      elif status == "missing":
+                          if val_str != "":
+                              brent_rows_valid = False
+                              brent_validation_err = f"New Brent row {idx} has missing status with non-empty value {val_str!r}"
+                              break
+                      else:
+                          brent_rows_valid = False
+                          brent_validation_err = f"New Brent row {idx} has invalid status {status!r}"
+                          break
+                  except (ValueError, InvalidOperation) as exc:
+                      brent_rows_valid = False
+                      brent_validation_err = f"New Brent row {idx} failed validation: {exc}"
+                      break
+
+              brent_failure_reason = None
+              if brent_rc != 0:
+                  brent_failure_reason = brent_err_ev.get("error") or brent_err.strip() or f"Exited with code {brent_rc}"
+              elif brent_fetch_ev is None or brent_done_ev is None:
+                  brent_failure_reason = "Brent collector did not emit required fetch_done and collector_done/up_to_date events"
+              elif not brent_rows_valid:
+                  brent_failure_reason = brent_validation_err
+              elif len(brent_after_rows) == 0:
+                  brent_failure_reason = "brent_crude_prices.csv contains 0 rows"
+
+              brent_stage_ok = brent_failure_reason is None
+              report["brent"] = {
+                  "name": "Brent (EIA/FRED)",
+                  "required": True,
+                  "status": "PASS" if brent_stage_ok else "FAIL",
+                  "exit_code": brent_rc,
+                  "http_or_source_status": (
+                      f"HTTP {brent_err_ev.get('status_code')}" if brent_err_ev.get("status_code")
+                      else (brent_done_ev.get("event") if brent_done_ev else ("OK (200)" if brent_rc == 0 else "ERROR"))
+                  ),
+                  "retrieved_rows": brent_fetch_ev.get("raw_rows") if brent_fetch_ev else None,
+                  "appended_rows": brent_appended,
+                  "total_rows": len(brent_after_rows),
+                  "latest_effective_or_obs_date": brent_last_date,
+                  "output_path": str(brent_tmp_csv),
+                  "failure_reason": brent_failure_reason,
+              }
+
+              # ===============================================================
+              # 3. USD/VND FX COLLECTOR (Optional per configs/collectors.yaml)
+              # ===============================================================
+              print("=== [3/3] Running USD/VND FX Collector ===")
+              fx_rc, fx_out, fx_err, fx_events = run_cmd(
+                  [sys.executable, "-m", "petrotwin.collectors.fx"], env=env
+              )
+              fx_after_rows = read_csv_rows(fx_tmp_csv)
+              fx_appended = len(fx_after_rows) - fx_before_rows
+              fx_done_ev = next((e for e in reversed(fx_events) if e.get("event") == "fetch_done"), {})
+              fx_skip_ev = next((e for e in reversed(fx_events) if e.get("event") in {"skip_weekend", "up_to_date"}), {})
+              fx_err_ev = next(
+                  (e for e in reversed(fx_events) if e.get("event") in {"fetch_error", "source_unavailable", "write_error"}),
+                  {},
+              )
+              fx_last_date = max((r["date"] for r in fx_after_rows if r.get("date")), default=None)
+              fx_pass = (fx_rc == 0) and bool(fx_done_ev or fx_skip_ev) and (len(fx_after_rows) > 0)
+              report["fx"] = {
+                  "name": "USD/VND FX (Algolab SBV)",
+                  "required": False,
+                  "status": "PASS" if fx_pass else "FAIL (OPTIONAL)",
+                  "exit_code": fx_rc,
+                  "http_or_source_status": (
+                      f"HTTP {fx_err_ev.get('status_code')}" if fx_err_ev.get("status_code")
+                      else (fx_skip_ev.get("event") if fx_skip_ev else ("OK (200)" if fx_rc == 0 else "ERROR"))
+                  ),
+                  "retrieved_rows": (1 if fx_done_ev else 0) if fx_rc == 0 else None,
+                  "appended_rows": fx_appended,
+                  "total_rows": len(fx_after_rows),
+                  "latest_effective_or_obs_date": fx_done_ev.get("date") or fx_last_date,
+                  "output_path": str(fx_tmp_csv),
+                  "failure_reason": fx_err_ev.get("error") or (fx_err.strip() if fx_rc != 0 else None),
+              }
+
+              # ===============================================================
+              # 4. PIPELINE & OFFLINE MYSQL_LOADER PREFLIGHT
+              # ===============================================================
+              print("=== [4/4] Running Pipeline & Offline MySQL Loader Preflight ===")
+              pipe_rc, pipe_out, pipe_err, _ = run_cmd(
+                  [
+                      sys.executable, "-m", "petrotwin.data.pipeline",
+                      "--raw-dir", str(tmp_raw),
+                      "--processed-dir", str(tmp_processed),
+                      "--log-dir", str(tmp_logs),
+                      "--config", str(repo_root / "configs" / "default.yaml"),
+                      "--collectors-config", str(repo_root / "configs" / "collectors.yaml"),
+                  ],
+                  env=env,
+              )
+
+              provenance_errors: list[str] = []
+              if pipe_rc != 0:
+                  provenance_errors.append(f"pipeline failed with exit code {pipe_rc}: {pipe_err.strip()}")
+              else:
+                  loader_rc, loader_out, loader_err, _ = run_cmd(
+                      [sys.executable, "-m", "petrotwin.data.mysql_loader", "--repo", str(tmp_root)],
+                      env=env,
+                  )
+                  if loader_rc != 0:
+                      provenance_errors.append(f"mysql_loader preflight failed with exit code {loader_rc}: {loader_err.strip()}")
+
+                  pointer = json.loads((tmp_processed / "current.json").read_text(encoding="utf-8"))
+                  run_dir = tmp_processed / pointer["path"]
+                  manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+                  manifest_sources = {s["source_id"]: s["snapshot_id"] for s in manifest.get("sources", [])}
+
+                  market_obs = read_csv_rows(run_dir / "market_observation.csv")
+                  fuel_obs = read_csv_rows(run_dir / "fuel_price_observation.csv")
+                  panel_obs = read_csv_rows(run_dir / "fuel_market_panel.csv")
+                  panel_row_count = len(panel_obs)
+
+                  # Validate Brent in manifest and market_observation.csv
+                  if "eia_fred" not in manifest_sources:
+                      provenance_errors.append("eia_fred missing from manifest.json sources")
+                  else:
+                      brent_snap = manifest_sources["eia_fred"]
+                      brent_market_rows = [
+                          r for r in market_obs
+                          if r.get("source_id") == "eia_fred" and r.get("snapshot_id") == brent_snap
+                      ]
+                      if not brent_market_rows:
+                          provenance_errors.append("market_observation.csv has 0 valid eia_fred rows matching manifest snapshot")
+
+                  # Validate every row in fuel_price_observation.csv
+                  for idx, r in enumerate(fuel_obs, start=2):
+                      src = (r.get("source_id") or "").strip()
+                      snap = (r.get("snapshot_id") or "").strip()
+                      url = (r.get("source_url") or "").strip()
+                      pid = (r.get("product_id") or "").strip()
+                      fuel_obs_by_source[src] = fuel_obs_by_source.get(src, 0) + 1
+
+                      if src == "comeco":
+                          if snap != manifest_sources.get("comeco"):
+                              provenance_errors.append(
+                                  f"fuel_price_observation row {idx}: comeco snapshot_id {snap!r} != manifest {manifest_sources.get('comeco')!r}"
+                              )
+                          if not is_valid_comeco_url(url):
+                              provenance_errors.append(
+                                  f"fuel_price_observation row {idx}: comeco row has non-comeco.vn URL {url!r}"
+                              )
+                          if pid not in EXPECTED_COMECO_PRODUCT_IDS:
+                              provenance_errors.append(
+                                  f"fuel_price_observation row {idx}: unexpected comeco product_id {pid!r}"
+                              )
+                      elif src == "pvoil":
+                          if snap != manifest_sources.get("pvoil"):
+                              provenance_errors.append(
+                                  f"fuel_price_observation row {idx}: pvoil snapshot_id {snap!r} != manifest {manifest_sources.get('pvoil')!r}"
+                              )
+                          if not is_valid_pvoil_url(url):
+                              provenance_errors.append(
+                                  f"fuel_price_observation row {idx}: pvoil row has non-pvoil.com.vn URL {url!r}"
+                              )
+                      else:
+                          provenance_errors.append(f"fuel_price_observation row {idx}: unexpected source_id {src!r}")
+
+                  if comeco_pass:
+                      comeco_r2p_errors = validate_comeco_raw_to_processed(
+                          comeco_after_rows,
+                          fuel_obs,
+                          manifest_sources.get("comeco"),
+                      )
+                      if comeco_r2p_errors:
+                          provenance_errors.extend(comeco_r2p_errors)
+                          comeco_pass = False
+                          report["comeco"]["status"] = "FAIL"
+                          report["comeco"]["failure_reason"] = "; ".join(comeco_r2p_errors)
+                  if "pvoil" not in manifest_sources or fuel_obs_by_source.get("pvoil", 0) != 1390:
+                      provenance_errors.append(
+                          f"Expected 1390 historical pvoil rows in fuel_price_observation.csv, got {fuel_obs_by_source.get('pvoil', 0)}"
+                      )
+
+              if provenance_errors and report["brent"]["status"] == "PASS" and any("eia_fred" in e for e in provenance_errors):
+                  report["brent"]["status"] = "FAIL"
+                  report["brent"]["failure_reason"] = "; ".join(e for e in provenance_errors if "eia_fred" in e)
+
+              brent_pass = report["brent"]["status"] == "PASS"
+
+              pvoil_after_sha = sha256_file(pvoil_tmp_csv)
+              repo_pvoil_sha = sha256_file(repo_root / "data" / "raw" / "data_price_petro.csv")
+              git_status_after = subprocess.check_output(
+                  ["git", "status", "--porcelain"], cwd=repo_root, text=True
+              )
+              pvoil_preserved = (
+                  pvoil_before_sha == EXPECTED_PVOIL_SHA256
+                  and pvoil_after_sha == EXPECTED_PVOIL_SHA256
+                  and repo_pvoil_sha == EXPECTED_PVOIL_SHA256
+                  and git_status_after == git_status_before
+              )
+              if not pvoil_preserved:
+                  provenance_errors.append("PVOIL baseline SHA-256 or repository working tree was modified during execution")
+
+              provenance_ok = (
+                  pipe_rc == 0
+                  and loader_rc == 0
+                  and pvoil_preserved
+                  and len(provenance_errors) == 0
+              )
+              if provenance_errors:
+                  unexpected_error = "; ".join(provenance_errors)
+
+              if brent_pass and comeco_pass and provenance_ok and fx_pass:
+                  overall_result = "ALL COLLECTORS WORK"
+                  exit_code = 0
+              elif brent_pass and comeco_pass and provenance_ok and not fx_pass:
+                  overall_result = "PARTIAL SUCCESS"
+                  exit_code = 0
+              else:
+                  overall_result = "FAILED"
+                  exit_code = 1
+
+          except Exception as exc:
+              unexpected_error = f"{type(exc).__name__}: {exc}"
+              print(f"FATAL VERIFICATION ERROR: {unexpected_error}", file=sys.stderr, flush=True)
+              overall_result = "FAILED"
+              exit_code = 1
+          finally:
+              try:
+                  summary_lines = [
+                      "## PetroTwin — Isolated Live Collector Verification Report",
+                      "",
+                      f"- **Overall Result**: **{overall_result}**",
+                      f"- **Branch Ref**: `{os.environ.get('GITHUB_REF_NAME', 'unknown')}`",
+                      f"- **Execution Order**: `COMECO -> Brent -> FX`",
+                      f"- **PVOIL Baseline & Repo Worktree Unchanged (`{EXPECTED_PVOIL_SHA256[:12]}...`)**: `{pvoil_preserved}` (`{pvoil_before_rows}` rows)",
+                      f"- **Pipeline Exit Code**: `{pipe_rc}` | **Offline `mysql_loader` Preflight Exit Code**: `{loader_rc}`",
+                      f"- **Manifest Snapshots**: `{json.dumps(manifest_sources)}`",
+                      f"- **Source Observations by Provider**: `{json.dumps(fuel_obs_by_source)}` | **Panel Rows**: `{panel_row_count}`",
+                  ]
+                  if unexpected_error:
+                      summary_lines.append(f"- **Verification Diagnostic**: `{unexpected_error}`")
+                  summary_lines.extend([
+                      "",
+                      "### Collector Status Table",
+                      "",
+                      "| Collector | Required? | Status | HTTP / Source Status | Retrieved Rows | Appended Rows | Total Rows | Latest Effective / Obs Date | Output File | Failure Reason |",
+                      "|---|---|---|---|---:|---:|---:|---|---|---|",
+                  ])
+                  for key in ("comeco", "brent", "fx"):
+                      c = report.get(key, {})
+                      summary_lines.append(
+                          f"| {c.get('name')} | {'Yes' if c.get('required') else 'No (Optional)'} | **{c.get('status')}** | "
+                          f"`{c.get('http_or_source_status')}` | `{c.get('retrieved_rows')}` | `{c.get('appended_rows')}` | "
+                          f"`{c.get('total_rows')}` | `{c.get('latest_effective_or_obs_date')}` | `{c.get('output_path')}` | "
+                          f"{c.get('failure_reason') or 'None'} |"
+                      )
+
+                  if report.get("comeco", {}).get("mapped_products"):
+                      summary_lines.extend([
+                          "",
+                          "### COMECO Mapped Canonical Products",
+                          "- " + ", ".join(f"`{p}`" for p in report["comeco"]["mapped_products"]),
+                      ])
+
+                  summary_md = "\n".join(summary_lines) + "\n"
+                  print("\n" + summary_md, flush=True)
+                  if summary_path:
+                      with open(summary_path, "a", encoding="utf-8") as sf:
+                          sf.write(summary_md)
+              except Exception as summary_exc:
+                  print(f"WARNING: Failed to write step summary: {summary_exc}", file=sys.stderr, flush=True)
+
+              if tmp_root is not None:
+                  shutil.rmtree(tmp_root, ignore_errors=True)
+
+          sys.exit(exit_code)
+          PY
