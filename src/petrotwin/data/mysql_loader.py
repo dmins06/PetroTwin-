@@ -14,10 +14,17 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+
+DEFAULT_INSERT_BATCH_SIZE = 500
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 15
+DEFAULT_READ_TIMEOUT_SECONDS = 60
+DEFAULT_WRITE_TIMEOUT_SECONDS = 60
+LOCAL_TIMEZONE = "Asia/Ho_Chi_Minh"
 
 
 class LoadError(Exception):
@@ -457,16 +464,65 @@ def _source_values(source: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _insert_many(cursor: Any, sql: str, rows: list[tuple[Any, ...]]) -> None:
-    if rows:
-        cursor.executemany(sql, rows)
+def _log_stage(
+    stage: str,
+    run_id: str,
+    elapsed_seconds: float,
+    rows: int | None = None,
+) -> None:
+    """Emit a flushed structured UTC timing log without credentials or SQL parameters."""
+    payload: dict[str, Any] = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "stage": stage,
+        "run_id": run_id,
+        "elapsed_seconds": round(max(0.0, elapsed_seconds), 4),
+    }
+    if rows is not None:
+        payload["rows"] = rows
+    print(json.dumps(payload, ensure_ascii=False), flush=True)
+
+
+def _insert_many(
+    cursor: Any,
+    sql: str,
+    rows: list[tuple[Any, ...]],
+    batch_size: int = DEFAULT_INSERT_BATCH_SIZE,
+) -> None:
+    if not rows:
+        return
+    step = max(1, int(batch_size))
+    for offset in range(0, len(rows), step):
+        cursor.executemany(sql, rows[offset:offset + step])
 
 
 def _mysql_connection_config(pymysql: Any) -> dict[str, Any]:
-    config = {"host": os.getenv("PETROTWIN_DB_HOST", "127.0.0.1"), "port": int(os.getenv("PETROTWIN_DB_PORT", "3306")), "database": os.getenv("PETROTWIN_DB_NAME", "petrotwin"), "user": os.getenv("PETROTWIN_DB_USER", "root"), "password": os.getenv("PETROTWIN_DB_PASSWORD", ""), "charset": "utf8mb4", "autocommit": False, "cursorclass": pymysql.cursors.DictCursor}
-    if os.getenv("PETROTWIN_DB_SSL", "false").strip().lower() not in {"true", "1", "yes"}: return config
+    connect_timeout = max(
+        1, int(os.getenv("PETROTWIN_DB_CONNECT_TIMEOUT", str(DEFAULT_CONNECT_TIMEOUT_SECONDS)))
+    )
+    read_timeout = max(
+        1, int(os.getenv("PETROTWIN_DB_READ_TIMEOUT", str(DEFAULT_READ_TIMEOUT_SECONDS)))
+    )
+    write_timeout = max(
+        1, int(os.getenv("PETROTWIN_DB_WRITE_TIMEOUT", str(DEFAULT_WRITE_TIMEOUT_SECONDS)))
+    )
+    config = {
+        "host": os.getenv("PETROTWIN_DB_HOST", "127.0.0.1"),
+        "port": int(os.getenv("PETROTWIN_DB_PORT", "3306")),
+        "database": os.getenv("PETROTWIN_DB_NAME", "petrotwin"),
+        "user": os.getenv("PETROTWIN_DB_USER", "root"),
+        "password": os.getenv("PETROTWIN_DB_PASSWORD", ""),
+        "charset": "utf8mb4",
+        "autocommit": False,
+        "connect_timeout": connect_timeout,
+        "read_timeout": read_timeout,
+        "write_timeout": write_timeout,
+        "cursorclass": pymysql.cursors.DictCursor,
+    }
+    if os.getenv("PETROTWIN_DB_SSL", "false").strip().lower() not in {"true", "1", "yes"}:
+        return config
     ca_path = os.getenv("PETROTWIN_DB_SSL_CA", "/etc/ssl/certs/ca-certificates.crt")
-    if not Path(ca_path).is_file(): raise LoadError(f"TiDB TLS CA bundle does not exist: {ca_path}")
+    if not Path(ca_path).is_file():
+        raise LoadError(f"TiDB TLS CA bundle does not exist: {ca_path}")
     config.update({"ssl_ca": ca_path, "ssl_verify_cert": True, "ssl_verify_identity": True})
     return config
 
@@ -487,10 +543,17 @@ def publish(bundle: dict[str, Any]) -> str:
         "fuel_price_observation.csv", "market_observation.csv",
         "fuel_market_panel.csv", "quarantine.csv",
     ))
+
+    publish_start = time.monotonic()
+    _log_stage("mysql_loader.connect.start", run_id, 0.0)
+    t0 = time.monotonic()
     connection = pymysql.connect(**config)
+    _log_stage("mysql_loader.connect.completed", run_id, time.monotonic() - t0)
     try:
         with connection.cursor() as cur:
+            t_tx = time.monotonic()
             connection.begin()
+            _log_stage("mysql_loader.transaction.started", run_id, time.monotonic() - t_tx)
             cur.execute(
                 "SELECT run_id, schema_version, pipeline_version, pipeline_sha256, "
                 "publication_status, manifest_json FROM dataset_run WHERE run_id=%s FOR UPDATE",
@@ -531,6 +594,7 @@ def publish(bundle: dict[str, Any]) -> str:
                 if existing_snapshots != expected_snapshots:
                     raise LoadError("existing run snapshots do not match current bundle; refusing repair")
 
+                t_rec = time.monotonic()
                 for table, expected in (
                     ("fuel_price_observation", len(fuel)), ("market_observation", len(market)),
                     ("fuel_market_panel", len(panel)), ("quarantine_record", len(quarantine)),
@@ -539,9 +603,12 @@ def publish(bundle: dict[str, Any]) -> str:
                     cur.execute(f"SELECT COUNT(*) AS n FROM {table} WHERE run_id=%s", (run_id,))
                     if int(cur.fetchone()["n"]) != expected:
                         raise LoadError(f"existing run is incomplete: {table} count mismatch; no auto-repair")
+                _log_stage("mysql_loader.reconciliation.completed", run_id, time.monotonic() - t_rec)
                 connection.rollback()
+                _log_stage("mysql_loader.completed", run_id, time.monotonic() - publish_start)
                 return f"run {run_id} already exists and its data/metadata reconcile; no rows changed"
 
+            t_stage = time.monotonic()
             try:
                 cur.execute("""INSERT INTO dataset_run
                     (run_id,schema_version,pipeline_version,pipeline_sha256,publication_status,
@@ -556,7 +623,9 @@ def publish(bundle: dict[str, Any]) -> str:
                 if isinstance(exc, getattr(pymysql, "IntegrityError", ())) or "duplicate" in msg or "1062" in msg or "unique" in msg:
                     raise LoadError(f"concurrent publication conflict: run_id {run_id} is already being published") from exc
                 raise
+            _log_stage("mysql_loader.dataset_run.insert.completed", run_id, time.monotonic() - t_stage, rows=1)
 
+            t_stage = time.monotonic()
             _insert_many(cur, """INSERT INTO source_snapshot
                 (snapshot_id,source_id,raw_filename,source_url,publisher_or_attribution,
                  license_reuse_terms,sha256,schema_fingerprint_sha256,source_row_count,
@@ -566,6 +635,9 @@ def publish(bundle: dict[str, Any]) -> str:
                 [_source_values(s) for s in sources.values()])
             _insert_many(cur, "INSERT INTO dataset_run_source (run_id,snapshot_id) VALUES (%s,%s)",
                          [(run_id, s["snapshot_id"]) for s in sources.values()])
+            _log_stage("mysql_loader.source_snapshot.insert.completed", run_id, time.monotonic() - t_stage, rows=len(sources))
+
+            t_stage = time.monotonic()
             cur.execute("SELECT product_id FROM fuel_product")
             known_products = {r["product_id"] for r in cur.fetchall()}
             cur.execute("SELECT series_id FROM market_series")
@@ -574,7 +646,9 @@ def publish(bundle: dict[str, Any]) -> str:
             series_ids = {r["series_id"] for r in market}
             if not products <= known_products or not series_ids <= known_series:
                 raise LoadError("accepted CSV uses product/series IDs missing from MySQL reference seeds")
+            _log_stage("mysql_loader.reference_validation.completed", run_id, time.monotonic() - t_stage)
 
+            t_stage = time.monotonic()
             _insert_many(cur, """INSERT INTO market_observation
                 (run_id,series_id,observation_date,snapshot_id,value,unit_code,observation_status,
                  source_value,source_url,retrieved_at_utc) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
@@ -582,15 +656,20 @@ def publish(bundle: dict[str, Any]) -> str:
                   r["snapshot_id"], _decimal(r["value"]), r["unit_code"], r["observation_status"],
                   _decimal(r["source_value"]), r["source_url"] or None,
                   _date_or_naive_utc(r["retrieved_at_utc"], i)) for i, r in enumerate(market, 2)])
+            _log_stage("mysql_loader.market_observation.insert.completed", run_id, time.monotonic() - t_stage, rows=len(market))
+
+            # Use %s for local_timezone (instead of a SQL string literal) so PyMySQL RE_INSERT_VALUES
+            # rewrites executemany() into a multi-row INSERT instead of 1-by-1 round-trips.
+            t_stage = time.monotonic()
             _insert_many(cur, """INSERT INTO fuel_price_observation
                 (run_id,product_id,source_record_date,effective_at_local,local_timezone,
                  effective_time_24_00_normalized,snapshot_id,source_product_name,price_value,
                  unit_code,price_change_value,stabilization_fund_subsidy,
                  stabilization_fund_subsidy_amount,stabilization_fund_subsidy_unit,
                  stabilization_fund_source_url,tax_included,source_url,retrieved_at_utc)
-                VALUES (%s,%s,%s,%s,'Asia/Ho_Chi_Minh',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                 [(run_id, r["product_id"], _date(r["source_record_date"], "source_record_date", i),
-                  _datetime(r["effective_at_local"], "effective_at_local", i),
+                  _datetime(r["effective_at_local"], "effective_at_local", i), LOCAL_TIMEZONE,
                   _boolean(r["effective_time_24_00_normalized"]), r["snapshot_id"],
                   r["source_product_name"], _decimal(r["price_value"]), r["unit_code"],
                   _decimal(r["price_change_value"]), _integer(r["stabilization_fund_subsidy"]),
@@ -599,12 +678,18 @@ def publish(bundle: dict[str, Any]) -> str:
                   r["stabilization_fund_source_url"] or None, _boolean(r["tax_included"]),
                   r["source_url"] or None, _date_or_naive_utc(r["retrieved_at_utc"], i))
                  for i, r in enumerate(fuel, 2)])
+            _log_stage("mysql_loader.fuel_price_observation.insert.completed", run_id, time.monotonic() - t_stage, rows=len(fuel))
+
+            t_stage = time.monotonic()
             _insert_many(cur, """INSERT INTO fund_annotation
                 (run_id,product_id,source_record_date,snapshot_id,fund_amount,unit_code,evidence_url)
                 VALUES (%s,%s,%s,%s,%s,%s,%s)""",
                 [(run_id, r["product_id"], _date(r["source_record_date"], "source_record_date", i),
                   bundle["annotation_source"]["snapshot_id"], _decimal(r["amount"]), r["unit"], r["source_url"])
                  for i, r in enumerate(bundle["annotations"], 2)])
+            _log_stage("mysql_loader.fund_annotation.insert.completed", run_id, time.monotonic() - t_stage, rows=len(bundle["annotations"]))
+
+            t_stage = time.monotonic()
             _insert_many(cur, """INSERT INTO fuel_market_panel
                 (run_id,product_id,effective_at_local,local_timezone,target_source_id,target_snapshot_id,
                  source_record_date,price_value,price_change_value,unit_code,stabilization_fund_subsidy,
@@ -612,9 +697,10 @@ def publish(bundle: dict[str, Any]) -> str:
                  stabilization_fund_source_url,brent_source_id,brent_snapshot_id,brent_observation_date,
                  brent_usd_per_barrel,brent_age_days,brent_unit,fx_source_id,fx_snapshot_id,
                  fx_observation_date,usd_vnd_rate,fx_age_days,fx_unit)
-                VALUES (%s,%s,%s,'Asia/Ho_Chi_Minh',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                 [(run_id, r["product_id"], _datetime(r["effective_at_local"], "effective_at_local", i),
-                  r["target_source_id"], r["target_snapshot_id"], _date(r["source_record_date"], "source_record_date", i),
+                  LOCAL_TIMEZONE, r["target_source_id"], r["target_snapshot_id"],
+                  _date(r["source_record_date"], "source_record_date", i),
                   _decimal(r["price_value"]), _decimal(r["price_change_value"]), r["unit_code"],
                   _integer(r["stabilization_fund_subsidy"]), _decimal(r["stabilization_fund_subsidy_amount"]),
                   r["stabilization_fund_subsidy_unit"] or None, r["stabilization_fund_source_url"] or None,
@@ -625,6 +711,8 @@ def publish(bundle: dict[str, Any]) -> str:
                   _date(r["fx_observation_date"], "fx_observation_date", i) if r["fx_observation_date"] else None,
                   _decimal(r["usd_vnd_rate"]), _integer(r["fx_age_days"]), r["usd_vnd_rate_unit"])
                  for i, r in enumerate(panel, 2)])
+            _log_stage("mysql_loader.fuel_market_panel.insert.completed", run_id, time.monotonic() - t_stage, rows=len(panel))
+
             source_for_file = {Path(s["raw_filename"]).name: s for s in sources.values()}
             quarantine_rows = []
             for i, r in enumerate(quarantine, 2):
@@ -633,11 +721,18 @@ def publish(bundle: dict[str, Any]) -> str:
                 quarantine_rows.append((run_id, int(r["source_row_number"]), s["source_id"],
                                         s["snapshot_id"], r["reason_code"], None,
                                         json.dumps(raw_json, ensure_ascii=False)))
+            t_stage = time.monotonic()
             _insert_many(cur, """INSERT INTO quarantine_record
                 (run_id,record_number,source_id,snapshot_id,reason_code,reason_detail,raw_row_json)
                 VALUES (%s,%s,%s,%s,%s,%s,%s)""", quarantine_rows)
+            _log_stage("mysql_loader.quarantine_record.insert.completed", run_id, time.monotonic() - t_stage, rows=len(quarantine_rows))
+
+            t_stage = time.monotonic()
             cur.execute("INSERT INTO quality_report (run_id,report_json) VALUES (%s,%s)",
                         (run_id, json.dumps(quality, ensure_ascii=False)))
+            _log_stage("mysql_loader.quality_report.insert.completed", run_id, time.monotonic() - t_stage, rows=1)
+
+            t_stage = time.monotonic()
             for table, expected in (
                 ("fuel_price_observation", len(fuel)), ("market_observation", len(market)),
                 ("fuel_market_panel", len(panel)), ("quarantine_record", len(quarantine)),
@@ -646,6 +741,9 @@ def publish(bundle: dict[str, Any]) -> str:
                 cur.execute(f"SELECT COUNT(*) AS n FROM {table} WHERE run_id=%s", (run_id,))
                 if int(cur.fetchone()["n"]) != expected:
                     raise LoadError(f"post-insert reconciliation failed for {table}")
+            _log_stage("mysql_loader.reconciliation.completed", run_id, time.monotonic() - t_stage)
+
+            t_stage = time.monotonic()
             cur.execute("UPDATE dataset_run SET publication_status=%s WHERE run_id=%s", (status, run_id))
             cur.execute("SELECT c.run_id, r.created_at_utc FROM dataset_current_pointer c "
                         "JOIN dataset_run r ON r.run_id=c.run_id WHERE c.singleton_id=1 FOR UPDATE")
@@ -655,7 +753,13 @@ def publish(bundle: dict[str, Any]) -> str:
             cur.execute("""INSERT INTO dataset_current_pointer (singleton_id,run_id,updated_at_utc)
                 VALUES (1,%s,UTC_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE
                 run_id=%s,updated_at_utc=UTC_TIMESTAMP(6)""", (run_id, run_id))
+            _log_stage("mysql_loader.pointer_update.completed", run_id, time.monotonic() - t_stage, rows=1)
+
+        _log_stage("mysql_loader.commit.started", run_id, time.monotonic() - publish_start)
+        t_commit = time.monotonic()
         connection.commit()
+        _log_stage("mysql_loader.commit.completed", run_id, time.monotonic() - t_commit)
+        _log_stage("mysql_loader.completed", run_id, time.monotonic() - publish_start)
         return (f"published run {run_id}: fuel={len(fuel)}, market={len(market)}, "
                 f"panel={len(panel)}, fund_annotations={len(bundle['annotations'])}, "
                 f"quarantine={len(quarantine)}; current pointer advanced")

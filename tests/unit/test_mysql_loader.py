@@ -949,3 +949,177 @@ def test_publish_idempotent_when_already_published(valid_bundle, monkeypatch):
     message = publish(valid_bundle)
     assert "already exists and its data/metadata reconcile; no rows changed" in message
     assert db.rollback_called == 1
+
+
+def test_mysql_connection_config_sets_explicit_timeouts(fake_pymysql, monkeypatch):
+    clear_db_env(monkeypatch)
+    monkeypatch.setenv("PETROTWIN_DB_CONNECT_TIMEOUT", "12")
+    monkeypatch.setenv("PETROTWIN_DB_READ_TIMEOUT", "45")
+    monkeypatch.setenv("PETROTWIN_DB_WRITE_TIMEOUT", "50")
+    config = _mysql_connection_config(fake_pymysql)
+    assert config["connect_timeout"] == 12
+    assert config["read_timeout"] == 45
+    assert config["write_timeout"] == 50
+
+
+def test_publish_emits_all_timing_logs_without_credentials_and_matches_pymysql_batching(
+    valid_bundle, monkeypatch, capsys
+):
+    """Verify all 17 required timing log stages are emitted with run_id/elapsed_seconds/rows,
+    no credentials are logged, and every executemany SQL matches PyMySQL RE_INSERT_VALUES."""
+    monkeypatch.setenv("PETROTWIN_DB_PASSWORD", "super_secret_password_123")
+    db = MockDB()
+    # Queue empty existing run, reference seeds, and post-insert counts
+    db.fetchone_queue.append(None)
+    db.fetchall_queue.append([{"product_id": p} for p in KNOWN_PRODUCTS])
+    db.fetchall_queue.append([{"series_id": s} for s in KNOWN_SERIES])
+    outputs = valid_bundle["outputs"]
+    for count in [
+        len(outputs["fuel_price_observation.csv"]),
+        len(outputs["market_observation.csv"]),
+        len(outputs["fuel_market_panel.csv"]),
+        len(outputs["quarantine.csv"]),
+        len(valid_bundle["annotations"]),
+    ]:
+        db.fetchone_queue.append({"n": count})
+    db.fetchone_queue.append(None)  # dataset_current_pointer
+
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: MockConnection(db))
+
+    publish(valid_bundle)
+    captured = capsys.readouterr().out
+    assert "super_secret_password_123" not in captured
+
+    events = [json.loads(line) for line in captured.splitlines() if line.strip()]
+    stages = [ev["stage"] for ev in events]
+    expected_stages = [
+        "mysql_loader.connect.start",
+        "mysql_loader.connect.completed",
+        "mysql_loader.transaction.started",
+        "mysql_loader.dataset_run.insert.completed",
+        "mysql_loader.source_snapshot.insert.completed",
+        "mysql_loader.reference_validation.completed",
+        "mysql_loader.market_observation.insert.completed",
+        "mysql_loader.fuel_price_observation.insert.completed",
+        "mysql_loader.fund_annotation.insert.completed",
+        "mysql_loader.fuel_market_panel.insert.completed",
+        "mysql_loader.quarantine_record.insert.completed",
+        "mysql_loader.quality_report.insert.completed",
+        "mysql_loader.reconciliation.completed",
+        "mysql_loader.pointer_update.completed",
+        "mysql_loader.commit.started",
+        "mysql_loader.commit.completed",
+        "mysql_loader.completed",
+    ]
+    assert stages == expected_stages
+    for ev in events:
+        assert ev["run_id"] == valid_bundle["manifest"]["run_id"]
+        assert isinstance(ev["elapsed_seconds"], float)
+        assert ev["ts"].endswith("Z")
+
+    # Every executemany INSERT must match PyMySQL's RE_INSERT_VALUES so it batches instead of 1-by-1
+    for sql, _params in db.executemany_queries:
+        if sql.lstrip().upper().startswith("INSERT"):
+            assert pymysql.cursors.RE_INSERT_VALUES.match(sql), f"SQL will not batch in PyMySQL: {sql}"
+
+
+def test_publish_chunks_large_inserts_into_500_row_batches(valid_bundle, monkeypatch):
+    """Verify _insert_many splits large row sets (e.g. 1,200 rows) into 500-row batches within one transaction."""
+    monkeypatch.setenv("PETROTWIN_DB_PASSWORD", "mock_pass")
+    large_bundle = copy.deepcopy(valid_bundle)
+    base_market_row = large_bundle["outputs"]["market_observation.csv"][0]
+    many_rows = []
+    for idx in range(1200):
+        row = copy.deepcopy(base_market_row)
+        # Distinct observation_date per row
+        day_num = idx % 28 + 1
+        month_num = (idx // 28) % 12 + 1
+        year_num = 2000 + (idx // (28 * 12))
+        row["observation_date"] = f"{year_num:04d}-{month_num:02d}-{day_num:02d}"
+        many_rows.append(row)
+    large_bundle["outputs"]["market_observation.csv"] = many_rows
+
+    db = MockDB()
+    db.fetchone_queue.append(None)
+    db.fetchall_queue.append([{"product_id": p} for p in KNOWN_PRODUCTS])
+    db.fetchall_queue.append([{"series_id": s} for s in KNOWN_SERIES])
+    outputs = large_bundle["outputs"]
+    for count in [
+        len(outputs["fuel_price_observation.csv"]),
+        len(outputs["market_observation.csv"]),
+        len(outputs["fuel_market_panel.csv"]),
+        len(outputs["quarantine.csv"]),
+        len(large_bundle["annotations"]),
+    ]:
+        db.fetchone_queue.append({"n": count})
+    db.fetchone_queue.append(None)
+
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: MockConnection(db))
+    msg = publish(large_bundle)
+    assert "market=1200" in msg
+    assert db.commit_called == 1
+
+    market_batches = [
+        len(params)
+        for sql, params in db.executemany_queries
+        if "INSERT INTO market_observation" in sql
+    ]
+    assert market_batches == [500, 500, 200]
+
+
+def test_publish_rolls_back_and_closes_on_connect_or_query_timeout(valid_bundle, monkeypatch):
+    """Verify connection timeout and query timeout propagate cleanly and close opened connections."""
+    monkeypatch.setenv("PETROTWIN_DB_PASSWORD", "mock_pass")
+
+    # 1. Connect timeout
+    monkeypatch.setattr(
+        pymysql,
+        "connect",
+        lambda **kwargs: (_ for _ in ()).throw(pymysql.err.OperationalError(2003, "connect timeout")),
+    )
+    with pytest.raises(pymysql.err.OperationalError, match="connect timeout"):
+        publish(valid_bundle)
+
+    # 2. Query timeout mid-insert -> rollback + close
+    db = MockDB()
+    db.fetchone_queue.append(None)
+    db.fetchall_queue.append([{"product_id": p} for p in KNOWN_PRODUCTS])
+    db.fetchall_queue.append([{"series_id": s} for s in KNOWN_SERIES])
+    db.raise_on_query_substr = "INSERT INTO fuel_market_panel"
+    db.error_to_raise = pymysql.err.OperationalError(2013, "Lost connection during query (read timeout)")
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: MockConnection(db))
+
+    with pytest.raises(pymysql.err.OperationalError, match="read timeout"):
+        publish(valid_bundle)
+    assert db.rollback_called == 1
+    assert db.close_called == 1
+    assert db.commit_called == 0
+    assert db.pointer_run_id is None
+
+
+def test_publish_existing_run_row_count_mismatch_fails_closed(valid_bundle, monkeypatch):
+    """When an existing run has a mismatched row count during reconciliation, loader refuses repair."""
+    monkeypatch.setenv("PETROTWIN_DB_PASSWORD", "mock_pass")
+    db = MockDB()
+    manifest = valid_bundle["manifest"]
+    quality = valid_bundle["quality"]
+    db.fetchone_queue.append({
+        "run_id": manifest["run_id"],
+        "schema_version": manifest["schema_version"],
+        "pipeline_version": manifest["pipeline_version"],
+        "pipeline_sha256": manifest["pipeline_sha256"],
+        "publication_status": quality["publication_status"],
+        "manifest_json": json.dumps(manifest),
+    })
+    db.fetchone_queue.append({"report_json": json.dumps(quality)})
+    db.fetchall_queue.append([
+        {"snapshot_id": s["snapshot_id"]} for s in valid_bundle["sources"].values()
+    ])
+    # First count (fuel_price_observation) mismatches by 1
+    db.fetchone_queue.append({"n": len(valid_bundle["outputs"]["fuel_price_observation.csv"]) + 1})
+
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: MockConnection(db))
+    with pytest.raises(LoadError, match="existing run is incomplete: fuel_price_observation count mismatch"):
+        publish(valid_bundle)
+    assert db.rollback_called == 1
+    assert db.close_called == 1

@@ -281,6 +281,24 @@ def _run_pipeline(collectors_config_path: Path | None = None) -> tuple[str, str 
         return "ok", None
 
 
+def _last_loader_stage(stdout: str | bytes | None) -> str | None:
+    """Extract the most recent mysql_loader.* stage name from captured stdout."""
+    if not stdout:
+        return None
+    text = stdout.decode("utf-8", errors="replace") if isinstance(stdout, bytes) else stdout
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("stage"), str) and obj["stage"].startswith("mysql_loader."):
+            return obj["stage"]
+    return None
+
+
 def _run_loader() -> tuple[str, str | None]:
     """Run petrotwin.data.mysql_loader --load. Returns (status, error)."""
     _print("starting mysql_loader")
@@ -293,8 +311,15 @@ def _run_loader() -> tuple[str, str | None]:
             encoding="utf-8",
             timeout=300,
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+        out = getattr(exc, "stdout", None) or getattr(exc, "output", None)
+        err_stream = getattr(exc, "stderr", None)
+        _echo_captured_stream(out)
+        _echo_captured_stream(err_stream)
+        last_stage = _last_loader_stage(out)
         err = "mysql_loader timed out after 300 seconds"
+        if last_stage:
+            err += f" (last_completed_stage={last_stage})"
         _print(f"error: {err}")
         return "failed", err
     except OSError as exc:

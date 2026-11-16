@@ -832,3 +832,30 @@ def test_comeco_raw_to_processed_handles_24_00_normalization():
     processed_rows[1]["effective_time_24_00_normalized"] = "false"
     errors = validate(raw_rows, processed_rows, "a" * 64)
     assert any("effective_time_24_00_normalized mismatch" in e for e in errors)
+
+
+def test_run_loader_timeout_echoes_stage_logs_and_reports_last_completed_stage(monkeypatch, capsys):
+    """When mysql_loader times out, runner._run_loader() must echo captured stdout/stderr
+    and include the last completed mysql_loader.* stage in the error message."""
+    import subprocess
+    from petrotwin.collectors import runner
+
+    def fake_timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd=args[0],
+            timeout=300,
+            output=(
+                '{"ts":"2026-11-16T18:36:56Z","stage":"mysql_loader.connect.start","run_id":"r1","elapsed_seconds":0.0}\n'
+                '{"ts":"2026-11-16T18:36:57Z","stage":"mysql_loader.fuel_price_observation.insert.completed","run_id":"r1","elapsed_seconds":120.5,"rows":1402}\n'
+            ),
+            stderr="partial stderr diagnostic",
+        )
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_timeout)
+    status, err = runner._run_loader()
+    captured = capsys.readouterr().out
+
+    assert status == "failed"
+    assert err == "mysql_loader timed out after 300 seconds (last_completed_stage=mysql_loader.fuel_price_observation.insert.completed)"
+    assert "mysql_loader.fuel_price_observation.insert.completed" in captured
+    assert "partial stderr diagnostic" in captured
