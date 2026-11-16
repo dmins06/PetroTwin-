@@ -663,15 +663,30 @@ def _insert_rows_chronologically(path: Path, rows: Sequence[dict[str, str]]) -> 
     """Atomically insert *rows* for missing dates into *path* in chronological order.
 
     Existing observations are preserved verbatim and never overwritten.
+    Raises FXSourceSchemaError if any new row conflicts with an existing row
+    or with another new row for the same date.
     """
-    existing_dates = set(_existing_dates_in_csv(path).keys())
+    existing_map = _existing_dates_in_csv(path)
     to_insert: list[dict[str, str]] = []
-    seen_new: set[date] = set()
+    seen_new: dict[date, int] = {}
     for row in rows:
         d = date.fromisoformat(row["date"].strip())
-        if d in existing_dates or d in seen_new:
+        rate = int(float(row["rate_vnd_per_usd"].strip()))
+        if d in existing_map:
+            if existing_map[d] != rate:
+                raise FXSourceSchemaError(
+                    f"Existing FX rate for {d.isoformat()} ({existing_map[d]}) "
+                    f"differs from new rate ({rate}); refusing to overwrite"
+                )
             continue
-        seen_new.add(d)
+        if d in seen_new:
+            if seen_new[d] != rate:
+                raise FXSourceSchemaError(
+                    f"Conflicting duplicate FX rows for {d.isoformat()}: "
+                    f"{seen_new[d]} vs {rate}"
+                )
+            continue
+        seen_new[d] = rate
         to_insert.append(row)
 
     if not to_insert:
@@ -710,6 +725,30 @@ def _insert_rows_chronologically(path: Path, rows: Sequence[dict[str, str]]) -> 
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+
+def _build_csv_row(
+    obs_date: date,
+    rate: int,
+    source_url: str,
+    extracted_at: str,
+) -> dict[str, str]:
+    """Build a single canonical raw CSV row for an SBV central rate observation."""
+    return {
+        "date": obs_date.isoformat(),
+        "base_currency": BASE_CURRENCY,
+        "quote_currency": QUOTE_CURRENCY,
+        "rate_vnd_per_usd": str(rate),
+        "unit": UNIT,
+        "rate_type": RATE_TYPE,
+        "source_url": source_url,
+        "source_attribution": (
+            f"provider={SOURCE_NAME}; source_id={SOURCE_ID}; "
+            f"upstream={UPSTREAM_SOURCE}; provenance_status={PROVENANCE_STATUS}"
+        ),
+        "source_value": _format_source_value(rate),
+        "extracted_at_utc": extracted_at,
+    }
+
 
 def backfill(
     start_date: date | None = None,
@@ -781,27 +820,11 @@ def backfill(
                     f"differs from fetched rate ({rate}); refusing to overwrite"
                 )
 
-        csv_rows: list[dict[str, str]] = []
-        for obs_date, rate in fetched_pairs:
-            if obs_date in existing_map:
-                continue
-            csv_rows.append(
-                {
-                    "date": obs_date.isoformat(),
-                    "base_currency": BASE_CURRENCY,
-                    "quote_currency": QUOTE_CURRENCY,
-                    "rate_vnd_per_usd": str(rate),
-                    "unit": UNIT,
-                    "rate_type": RATE_TYPE,
-                    "source_url": str(settings["source_url"]),
-                    "source_attribution": (
-                        f"provider={SOURCE_NAME}; source_id={SOURCE_ID}; "
-                        f"upstream={UPSTREAM_SOURCE}; provenance_status={PROVENANCE_STATUS}"
-                    ),
-                    "source_value": _format_source_value(rate),
-                    "extracted_at_utc": extracted_at,
-                }
-            )
+        csv_rows = [
+            _build_csv_row(obs_date, rate, str(settings["source_url"]), extracted_at)
+            for obs_date, rate in fetched_pairs
+            if obs_date not in existing_map
+        ]
 
         # Identify weekdays in [effective_start, effective_end] absent from both CSV and Algolab
         unrecoverable_dates: list[str] = []
@@ -857,10 +880,10 @@ def backfill(
 
 
 def run() -> int:
-    """Fetch USD/VND rate and append to CSV if not already present today.
+    """Fetch USD/VND rate (plus any missed working days since last CSV date) and write to CSV.
 
     Returns:
-        Number of new rows added (0 or 1).
+        Number of new rows added.
     """
     with file_lock("fx") as acquired:
         if not acquired:
@@ -902,31 +925,106 @@ def run() -> int:
             _log("up_to_date", date=observation_date.isoformat())
             return 0
 
-        row: dict[str, str] = {
-            "date": observation_date.isoformat(),
-            "base_currency": BASE_CURRENCY,
-            "quote_currency": QUOTE_CURRENCY,
-            "rate_vnd_per_usd": str(rate),
-            "unit": UNIT,
-            "rate_type": RATE_TYPE,
-            "source_url": str(settings["source_url"]),
-            "source_attribution": (
-                f"provider={SOURCE_NAME}; source_id={SOURCE_ID}; "
-                f"upstream={UPSTREAM_SOURCE}; provenance_status={PROVENANCE_STATUS}"
-            ),
-            "source_value": _format_source_value(rate),
-            "extracted_at_utc": _utcnow_iso(),
-        }
+        existing_map = _existing_dates_in_csv(csv_path)
+        last_date = max(existing_map) if existing_map else None
+        source_url = str(settings["source_url"])
+        extracted_at = _utcnow_iso()
+
+        rows_to_write: list[dict[str, str]] = []
+        has_weekday_gap = (
+            last_date is not None
+            and last_date < observation_date
+            and any(
+                (last_date + timedelta(days=offset)).weekday() < 5
+                for offset in range(1, (observation_date - last_date).days)
+            )
+        )
+        if has_weekday_gap and last_date is not None:
+            try:
+                catchup_pairs = _fetch_history_with_retries(
+                    last_date + timedelta(days=1),
+                    observation_date,
+                    include_saturdays=False,
+                )
+            except FXSourceSchemaError as exc:
+                _log("fetch_error", error=str(exc), preserved_last_date=last_date.isoformat())
+                sys.exit(1)
+            except (FXSourceUnavailableError, requests.RequestException) as exc:
+                _log(
+                    "history_catchup_degraded",
+                    reason="history_catchup_failed",
+                    error=str(exc),
+                    preserved_last_date=last_date.isoformat(),
+                    target_observation_date=observation_date.isoformat(),
+                )
+                sys.exit(1)
+
+            catchup_by_date = dict(catchup_pairs)
+            if not catchup_pairs or observation_date not in catchup_by_date:
+                _log(
+                    "history_catchup_degraded",
+                    reason="incomplete_history_response",
+                    preserved_last_date=last_date.isoformat(),
+                    target_observation_date=observation_date.isoformat(),
+                    history_dates_count=len(catchup_pairs),
+                )
+                sys.exit(1)
+
+            if catchup_by_date[observation_date] != rate:
+                _log(
+                    "fetch_error",
+                    error=(
+                        f"Algolab UDF history rate for {observation_date.isoformat()} "
+                        f"({catchup_by_date[observation_date]}) differs from latest HTML rate ({rate})"
+                    ),
+                    preserved_last_date=last_date.isoformat(),
+                )
+                sys.exit(1)
+
+            unobserved_weekdays: list[str] = []
+            cur = last_date + timedelta(days=1)
+            while cur < observation_date:
+                if cur.weekday() < 5 and cur not in catchup_by_date and cur not in existing_map:
+                    unobserved_weekdays.append(cur.isoformat())
+                cur += timedelta(days=1)
+            if unobserved_weekdays:
+                _log(
+                    "catchup_unobserved_weekdays",
+                    count=len(unobserved_weekdays),
+                    dates=unobserved_weekdays,
+                )
+
+            for obs_d, obs_r in catchup_pairs:
+                if obs_d == observation_date:
+                    continue
+                if obs_d in existing_map:
+                    if existing_map[obs_d] != obs_r:
+                        _log(
+                            "fetch_error",
+                            error=(
+                                f"Existing FX rate for {obs_d.isoformat()} ({existing_map[obs_d]}) "
+                                f"differs from fetched rate ({obs_r}); refusing to overwrite"
+                            ),
+                            preserved_last_date=last_date.isoformat(),
+                        )
+                        sys.exit(1)
+                    continue
+                rows_to_write.append(_build_csv_row(obs_d, obs_r, source_url, extracted_at))
+
+        rows_to_write.append(_build_csv_row(observation_date, rate, source_url, extracted_at))
 
         try:
-            _append_to_csv(csv_path, [row])
+            inserted = _insert_rows_chronologically(csv_path, rows_to_write)
+        except FXSourceSchemaError as exc:
+            _log("fetch_error", error=str(exc), path=str(csv_path))
+            sys.exit(1)
         except OSError as exc:
             _log("write_error", error=str(exc), path=str(csv_path))
             sys.exit(1)
 
-        _log("collector_done", date=observation_date.isoformat(), rate=rate, new_rows=1,
+        _log("collector_done", date=observation_date.isoformat(), rate=rate, new_rows=inserted,
              path=str(csv_path))
-        return 1
+        return inserted
 
 
 def main(argv: Sequence[str] | None = None) -> None:

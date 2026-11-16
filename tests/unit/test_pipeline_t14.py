@@ -805,3 +805,78 @@ def test_current_repo_raw_datasets_validate_end_to_end_in_isolated_temp_dir(tmp_
     assert quality["source_checks"]["usd_vnd"]["rows_canonical"] == 2417
     assert quality["integrated"]["fuel_price_observation_rows"] == 1402
     assert quality["integrated"]["fuel_market_panel_rows"] == 1402
+
+
+def test_fx_audit_multi_date_as_of_join_excludes_same_day_and_future_for_pvoil_and_comeco(tmp_path):
+    """Audit T14: With multiple FX observations including same-day (2026-11-12) and future (2026-11-16),
+    both PVOIL and COMECO receive the strictly prior FX observation (and extracted_at_utc does not
+    alter observation_date)."""
+    raw_dir, processed_dir, log_dir, cfg = _setup_base_pipeline(tmp_path)
+    coll_cfg = tmp_path / "collectors.yaml"
+    coll_cfg.write_text("fx:\n  optional: true\n  max_age_days: 7\n", encoding="utf-8")
+
+    # PVOIL on 2026-11-05, COMECO on 2026-11-12
+    with (raw_dir / pipeline.FUEL_FILE).open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(pipeline.EXPECTED_HEADERS[pipeline.FUEL_FILE])
+        w.writerow([
+            "2026-11-05", "2026-11-05", "15:00", "Xăng RON 95-III", "21150", "21.150 đ", "-2080",
+            "-2080", "Đồng/lít thực tế", "true", "https://www.pvoil.com.vn/tin-gia-xang-dau", "2026-11-05T08:00:00Z",
+        ])
+    with (raw_dir / pipeline.COMECO_FUEL_FILE).open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(pipeline.EXPECTED_HEADERS[pipeline.COMECO_FUEL_FILE])
+        w.writerow([
+            "2026-11-16", "2026-11-12", "15:00", "Xăng E10 RON 95-III", "19840", "19.840 đ", "",
+            "", "Đồng/lít thực tế", "true", "https://comeco.vn/", "2026-11-16T08:33:01Z",
+        ])
+
+    # FX rows: 2026-11-04 (prior to PVOIL), 2026-11-11 (extracted later on 2026-11-16!), 2026-11-12 (same-day), 2026-11-16 (future)
+    fx_rows = [
+        ["2026-11-04", "USD", "VND", "25627", "VND per 1 USD", "SBV central reference rate",
+         "https://algolab.vn/macro/vn-fx-rate-ty-gia-sbv-trung-tam", "Algolab", "25,627", "2026-11-16T17:16:26Z"],
+        ["2026-11-11", "USD", "VND", "25611", "VND per 1 USD", "SBV central reference rate",
+         "https://algolab.vn/macro/vn-fx-rate-ty-gia-sbv-trung-tam", "Algolab", "25,611", "2026-11-16T17:16:26Z"],
+        ["2026-11-12", "USD", "VND", "25623", "VND per 1 USD", "SBV central reference rate",
+         "https://algolab.vn/macro/vn-fx-rate-ty-gia-sbv-trung-tam", "Algolab", "25,623", "2026-11-16T17:16:26Z"],
+        ["2026-11-16", "USD", "VND", "25639", "VND per 1 USD", "SBV central reference rate",
+         "https://algolab.vn/macro/vn-fx-rate-ty-gia-sbv-trung-tam", "Algolab", "25,639", "2026-11-16T08:53:55Z"],
+    ]
+    write_fx(raw_dir / pipeline.FX_FILE, fx_rows)
+
+    quality = pipeline.run_pipeline(
+        raw_dir, processed_dir, log_dir, cfg,
+        collectors_config_path=coll_cfg,
+        current_date=date(2026, 11, 16),
+    )
+
+    panel_path = processed_dir / "runs" / quality["run_id"] / "fuel_market_panel.csv"
+    with panel_path.open(newline="", encoding="utf-8") as fh:
+        by_src = {r["target_source_id"]: r for r in csv.DictReader(fh)}
+
+    assert by_src["pvoil"]["fx_observation_date"] == "2026-11-04"
+    assert by_src["pvoil"]["usd_vnd_rate"] == "25627"
+    assert by_src["pvoil"]["fx_age_days"] == "1"
+
+    assert by_src["comeco"]["fx_observation_date"] == "2026-11-11"
+    assert by_src["comeco"]["usd_vnd_rate"] == "25611"
+    assert by_src["comeco"]["fx_age_days"] == "1"
+
+
+def test_fx_duplicate_exact_collapsed_and_conflicting_duplicate_rejected(tmp_path):
+    """Audit T14: Exact duplicate FX rows are collapsed; conflicting duplicates on the same date fail closed."""
+    path_exact = tmp_path / "exact.csv"
+    row = valid_fx_row("2026-11-11")
+    write_fx(path_exact, [row, row])
+    rows, quarantine, quality = parse_fx(path_exact)
+    assert len(rows) == 1
+    assert quarantine == []
+    assert quality["exact_duplicates_collapsed"] == 1
+
+    path_conflict = tmp_path / "conflict.csv"
+    row2 = valid_fx_row("2026-11-11")
+    row2[3] = "25999"
+    row2[8] = "25,999"
+    write_fx(path_conflict, [row, row2])
+    with pytest.raises(pipeline.PipelineError, match="conflicting duplicate key"):
+        parse_fx(path_conflict)
