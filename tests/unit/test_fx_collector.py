@@ -274,3 +274,261 @@ def test_provenance_is_provider_declared(monkeypatch, tmp_path):
     assert "provenance_status=provider_declared" in content
     assert "upstream=State Bank of Vietnam" in content
     assert "provider=Algolab" in content
+
+def algolab_jsonld_html(
+    rate="25.639",
+    observation_date="16/11/2026",
+    date_modified="2026-11-16",
+    source="GSO / SBV",
+    unit="VND",
+):
+    description = (
+        f"Tỷ giá USD: Tỷ giá SBV trung tâm — số liệu theo ngày "
+        f"của Việt Nam, đơn vị VND. Mới nhất {rate} VND "
+        f"({observation_date}). Nguồn: {source}."
+    )
+    dataset = {
+        "@context": "https://schema.org",
+        "@type": "Dataset",
+        "name": "Tỷ giá USD: Tỷ giá SBV trung tâm (Việt Nam)",
+        "description": description,
+        "dateModified": date_modified,
+        "variableMeasured": {
+            "@type": "PropertyValue",
+            "name": "Tỷ giá USD: Tỷ giá SBV trung tâm",
+            "unitText": unit,
+        },
+        "isBasedOn": {
+            "@type": "CreativeWork",
+            "name": source,
+        },
+    }
+    import json
+
+    return f"""
+    <html lang="vi">
+      <head>
+        <script type="application/ld+json">{json.dumps(dataset, ensure_ascii=False)}</script>
+      </head>
+      <body>
+        <h1>Tỷ giá USD: Tỷ giá SBV trung tâm</h1>
+        <div>25,639</div>
+        <div>16/11/2026</div>
+      </body>
+    </html>
+    """
+
+
+def test_algolab_jsonld_dataset_is_parsed(monkeypatch):
+    monkeypatch.setattr(fx, "date", type("FrozenDate", (date,), {
+        "today": classmethod(lambda cls: date(2026, 11, 16))
+    }))
+    assert fx._parse_algolab_html(algolab_jsonld_html()) == (
+        25639,
+        date(2026, 11, 16),
+    )
+
+
+@pytest.mark.parametrize("html", [
+    algolab_jsonld_html(source="Vietcombank"),
+    algolab_jsonld_html(unit="USD"),
+    algolab_jsonld_html(date_modified="2026-11-15"),
+])
+def test_algolab_jsonld_invalid_metadata_fails_closed(monkeypatch, html):
+    monkeypatch.setattr(fx, "date", type("FrozenDate", (date,), {
+        "today": classmethod(lambda cls: date(2026, 11, 16))
+    }))
+    with pytest.raises(fx.FXSourceSchemaError):
+        fx._parse_algolab_html(html)
+
+
+def test_algolab_tv_symbol_validation_accepts_sbv_and_rejects_commercial():
+    valid_meta = {
+        "name": "VN_FX_RATE_TY_GIA_SBV_TRUNG_TAM",
+        "ticker": "VN_FX_RATE_TY_GIA_SBV_TRUNG_TAM",
+        "description": "Tỷ giá USD: Tỷ giá SBV trung tâm (VND)",
+        "type": "economy",
+    }
+    fx._validate_algolab_tv_symbol(valid_meta)
+
+    with pytest.raises(fx.FXSourceSchemaError):
+        fx._validate_algolab_tv_symbol({
+            "name": "VN_FX_RATE_TY_GIA_SBV_TRUNG_TAM",
+            "ticker": "VN_FX_RATE_TY_GIA_SBV_TRUNG_TAM",
+            "description": "Tỷ giá USD: Vietcombank",
+            "type": "economy",
+        })
+
+
+def test_fx_backfill_recovers_missing_dates_preserves_existing_and_reports_unrecoverable(monkeypatch, tmp_path):
+    import csv
+    from datetime import datetime, timezone
+
+    verified_config(monkeypatch, tmp_path)
+    csv_path = tmp_path / "usd_vnd_rates.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fx.COLUMNS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows([
+            {
+                "date": "2026-10-22",
+                "base_currency": "USD",
+                "quote_currency": "VND",
+                "rate_vnd_per_usd": "25632",
+                "unit": fx.UNIT,
+                "rate_type": fx.RATE_TYPE,
+                "source_url": fx.ALGOLAB_URL,
+                "source_attribution": "Algolab page identifies source as GSO / State Bank of Vietnam (SBV)",
+                "source_value": "25,632",
+                "extracted_at_utc": "2026-10-23T06:02:10Z",
+            },
+            {
+                "date": "2026-10-28",
+                "base_currency": "USD",
+                "quote_currency": "VND",
+                "rate_vnd_per_usd": "25631",
+                "unit": fx.UNIT,
+                "rate_type": fx.RATE_TYPE,
+                "source_url": fx.ALGOLAB_URL,
+                "source_attribution": "provider=Algolab; source_id=algolab_sbv_central_rate; upstream=State Bank of Vietnam; provenance_status=provider_declared",
+                "source_value": "25,631",
+                "extracted_at_utc": "2026-10-28T09:00:00Z",
+            },
+        ])
+
+    monkeypatch.setattr(fx, "_csv_path", lambda: csv_path)
+    # Upstream returns 2026-10-22, 2026-10-23, 2026-10-27, 2026-10-28 (2026-10-26 is absent -> holiday/unrecoverable)
+    monkeypatch.setattr(
+        fx,
+        "_fetch_history_with_retries",
+        lambda start, end, include_saturdays=False: [
+            (date(2026, 10, 22), 25632),
+            (date(2026, 10, 23), 25627),
+            (date(2026, 10, 27), 25633),
+            (date(2026, 10, 28), 25631),
+        ],
+    )
+
+    # 1. Dry-run does not modify the CSV
+    before = csv_path.read_bytes()
+    dry_res = fx.backfill(start_date=date(2026, 10, 22), end_date=date(2026, 10, 28), dry_run=True)
+    assert [r["date"] for r in dry_res["recovered_rows"]] == ["2026-10-23", "2026-10-27"]
+    assert dry_res["unrecoverable_dates"] == ["2026-10-26"]
+    assert csv_path.read_bytes() == before
+
+    # 2. Write backfill inserts missing rows in chronological order without overwriting existing rows
+    res = fx.backfill(start_date=date(2026, 10, 22), end_date=date(2026, 10, 28), dry_run=False)
+    assert [r["date"] for r in res["recovered_rows"]] == ["2026-10-23", "2026-10-27"]
+    assert res["unrecoverable_dates"] == ["2026-10-26"]
+
+    with csv_path.open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    assert [r["date"] for r in rows] == ["2026-10-22", "2026-10-23", "2026-10-27", "2026-10-28"]
+    # Existing 2026-10-22 row attribution and timestamp preserved verbatim
+    assert rows[0]["source_attribution"] == "Algolab page identifies source as GSO / State Bank of Vietnam (SBV)"
+    assert rows[0]["extracted_at_utc"] == "2026-10-23T06:02:10Z"
+    assert rows[1]["rate_vnd_per_usd"] == "25627"
+    assert "provenance_status=provider_declared" in rows[1]["source_attribution"]
+    assert rows[2]["rate_vnd_per_usd"] == "25633"
+
+    # 3. Repeated backfill is idempotent
+    after = csv_path.read_bytes()
+    res2 = fx.backfill(start_date=date(2026, 10, 22), end_date=date(2026, 10, 28), dry_run=False)
+    assert res2["recovered_rows"] == []
+    assert csv_path.read_bytes() == after
+
+
+def test_algolab_tv_symbol_validation_accepts_sbv_and_rejects_commercial():
+    valid_meta = {
+        "name": "VN_FX_RATE_TY_GIA_SBV_TRUNG_TAM",
+        "ticker": "VN_FX_RATE_TY_GIA_SBV_TRUNG_TAM",
+        "description": "Tỷ giá USD: Tỷ giá SBV trung tâm (VND)",
+        "type": "economy",
+    }
+    fx._validate_algolab_tv_symbol(valid_meta)
+
+    with pytest.raises(fx.FXSourceSchemaError):
+        fx._validate_algolab_tv_symbol({
+            "name": "VN_FX_RATE_TY_GIA_SBV_TRUNG_TAM",
+            "ticker": "VN_FX_RATE_TY_GIA_SBV_TRUNG_TAM",
+            "description": "Tỷ giá USD: Vietcombank",
+            "type": "economy",
+        })
+
+
+def test_fx_backfill_recovers_missing_dates_preserves_existing_and_reports_unrecoverable(monkeypatch, tmp_path):
+    import csv
+    from datetime import datetime, timezone
+
+    verified_config(monkeypatch, tmp_path)
+    csv_path = tmp_path / "usd_vnd_rates.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fx.COLUMNS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows([
+            {
+                "date": "2026-10-22",
+                "base_currency": "USD",
+                "quote_currency": "VND",
+                "rate_vnd_per_usd": "25632",
+                "unit": fx.UNIT,
+                "rate_type": fx.RATE_TYPE,
+                "source_url": fx.ALGOLAB_URL,
+                "source_attribution": "Algolab page identifies source as GSO / State Bank of Vietnam (SBV)",
+                "source_value": "25,632",
+                "extracted_at_utc": "2026-10-23T06:02:10Z",
+            },
+            {
+                "date": "2026-10-28",
+                "base_currency": "USD",
+                "quote_currency": "VND",
+                "rate_vnd_per_usd": "25631",
+                "unit": fx.UNIT,
+                "rate_type": fx.RATE_TYPE,
+                "source_url": fx.ALGOLAB_URL,
+                "source_attribution": "provider=Algolab; source_id=algolab_sbv_central_rate; upstream=State Bank of Vietnam; provenance_status=provider_declared",
+                "source_value": "25,631",
+                "extracted_at_utc": "2026-10-28T09:00:00Z",
+            },
+        ])
+
+    monkeypatch.setattr(fx, "_csv_path", lambda: csv_path)
+    # Upstream returns 2026-10-22, 2026-10-23, 2026-10-27, 2026-10-28 (2026-10-26 is absent -> holiday/unrecoverable)
+    monkeypatch.setattr(
+        fx,
+        "_fetch_history_with_retries",
+        lambda start, end, include_saturdays=False: [
+            (date(2026, 10, 22), 25632),
+            (date(2026, 10, 23), 25627),
+            (date(2026, 10, 27), 25633),
+            (date(2026, 10, 28), 25631),
+        ],
+    )
+
+    # 1. Dry-run does not modify the CSV
+    before = csv_path.read_bytes()
+    dry_res = fx.backfill(start_date=date(2026, 10, 22), end_date=date(2026, 10, 28), dry_run=True)
+    assert [r["date"] for r in dry_res["recovered_rows"]] == ["2026-10-23", "2026-10-27"]
+    assert dry_res["unrecoverable_dates"] == ["2026-10-26"]
+    assert csv_path.read_bytes() == before
+
+    # 2. Write backfill inserts missing rows in chronological order without overwriting existing rows
+    res = fx.backfill(start_date=date(2026, 10, 22), end_date=date(2026, 10, 28), dry_run=False)
+    assert [r["date"] for r in res["recovered_rows"]] == ["2026-10-23", "2026-10-27"]
+    assert res["unrecoverable_dates"] == ["2026-10-26"]
+
+    with csv_path.open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    assert [r["date"] for r in rows] == ["2026-10-22", "2026-10-23", "2026-10-27", "2026-10-28"]
+    # Existing 2026-10-22 row attribution and timestamp preserved verbatim
+    assert rows[0]["source_attribution"] == "Algolab page identifies source as GSO / State Bank of Vietnam (SBV)"
+    assert rows[0]["extracted_at_utc"] == "2026-10-23T06:02:10Z"
+    assert rows[1]["rate_vnd_per_usd"] == "25627"
+    assert "provenance_status=provider_declared" in rows[1]["source_attribution"]
+    assert rows[2]["rate_vnd_per_usd"] == "25633"
+
+    # 3. Repeated backfill is idempotent
+    after = csv_path.read_bytes()
+    res2 = fx.backfill(start_date=date(2026, 10, 22), end_date=date(2026, 10, 28), dry_run=False)
+    assert res2["recovered_rows"] == []
+    assert csv_path.read_bytes() == after

@@ -148,8 +148,14 @@ def prepare_bundle(repo: Path | None = None) -> dict[str, Any]:
     run_dir = (root / "data/processed" / pointer["path"]).resolve()
     if not run_dir.is_relative_to((root / "data/processed").resolve()):
         raise LoadError("current.json path resolves outside data/processed")
+    if not run_dir.is_dir():
+        raise LoadError(f"current.json references missing run directory: {run_dir}")
     manifest_path = run_dir / "manifest.json"
     quality_path = run_dir / "quality_report.json"
+    if not manifest_path.is_file():
+        raise LoadError(f"Missing manifest.json in run directory: {manifest_path}")
+    if not quality_path.is_file():
+        raise LoadError(f"Missing quality_report.json in run directory: {quality_path}")
     manifest, quality = _read_json(manifest_path), _read_json(quality_path)
     run_id = pointer["run_id"]
     if manifest.get("run_id") != run_id or quality.get("run_id") != run_id:

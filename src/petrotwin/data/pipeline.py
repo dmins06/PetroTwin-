@@ -456,7 +456,7 @@ def _parse_fuel(
             )
         if raw["unit"] != "Đồng/lít thực tế":
             raise PipelineError(f"{path.name} row {row_number}: unsupported fuel unit {raw['unit']!r}")
-        if not raw["source_url"].strip():
+        if not raw["source_url"].strip() and path.name != FUEL_FILE:
             raise PipelineError(f"{path.name} row {row_number}: source_url is required")
         retrieved_at = _parse_retrieved_at(raw["extracted_at_utc"], path.name, row_number)
         product_input_counts[product_id] += 1
@@ -511,7 +511,9 @@ def _parse_fuel(
             continue
 
         src_url = raw["source_url"].strip().lower()
-        if "comeco.vn" in src_url:
+        if not src_url and path.name == FUEL_FILE:
+            row_source_id = "pvoil"
+        elif "comeco.vn" in src_url:
             row_source_id = "comeco"
         elif "pvoil" in src_url:
             row_source_id = "pvoil"
@@ -885,6 +887,65 @@ def _integrate_fuel_market(
     return integrated, dict(sorted(missing_features.items()))
 
 
+def _assess_event_fx_freshness(
+    panel_rows: list[dict[str, Any]],
+    fx_max_age_days: int,
+) -> dict[str, Any]:
+    """Evaluate FX freshness for every fuel event in the integrated panel.
+
+    Verifies that every attached FX observation is strictly prior to the fuel
+    event date (preventing look-ahead leakage), preserves ``fx_observation_date``,
+    ``fx_age_days``, ``fx_source_id``, and ``fx_snapshot_id``, and identifies
+    stale event-level FX observations where ``fx_age_days > fx_max_age_days``.
+    """
+    events_evaluated = 0
+    events_without_prior_fx = 0
+    fresh_events_count = 0
+    stale_events: list[dict[str, Any]] = []
+    max_event_fx_age_days: int | None = None
+
+    for row in panel_rows:
+        event_date = datetime.fromisoformat(row["effective_at_local"]).date()
+        obs_date_str = str(row.get("fx_observation_date") or "").strip()
+        if not obs_date_str:
+            events_without_prior_fx += 1
+            continue
+        obs_date = date.fromisoformat(obs_date_str)
+        age_days = int(row["fx_age_days"])
+        if obs_date >= event_date or age_days < 1:
+            raise PipelineError(
+                f"look-ahead FX observation detected for fuel event "
+                f"({row['product_id']!r}, {row['effective_at_local']!r}): "
+                f"fx_observation_date={obs_date_str!r}, fx_age_days={age_days}"
+            )
+        events_evaluated += 1
+        if max_event_fx_age_days is None or age_days > max_event_fx_age_days:
+            max_event_fx_age_days = age_days
+        if age_days > fx_max_age_days:
+            stale_events.append({
+                "product_id": row["product_id"],
+                "effective_at_local": row["effective_at_local"],
+                "fx_observation_date": obs_date_str,
+                "fx_age_days": age_days,
+                "fx_source_id": row["fx_source_id"],
+                "fx_snapshot_id": row["fx_snapshot_id"],
+            })
+        else:
+            fresh_events_count += 1
+
+    stale_events.sort(key=lambda item: (item["effective_at_local"], item["product_id"]))
+    return {
+        "max_age_days": fx_max_age_days,
+        "events_evaluated": events_evaluated,
+        "events_without_prior_fx": events_without_prior_fx,
+        "fresh_events_count": fresh_events_count,
+        "stale_events_count": len(stale_events),
+        "max_event_fx_age_days": max_event_fx_age_days,
+        "has_stale_events": bool(stale_events),
+        "stale_events": stale_events,
+    }
+
+
 def _validate_fx_config(collectors_config: Any) -> tuple[bool, int]:
     """Validate collectors_config.fx and return (fx_optional, fx_max_age_days) with defaults."""
     if not isinstance(collectors_config, dict):
@@ -1159,6 +1220,10 @@ def run_pipeline(
         )
         panel_rows, missing_prior_market = _integrate_fuel_market(fuel, market_rows)
         _validate_integrated_outputs(fuel, market_rows, panel_rows, not fx_optional)
+        event_fx_freshness = _assess_event_fx_freshness(panel_rows, fx_max_age_days)
+        fx_quality["event_freshness"] = event_fx_freshness
+        fx_quality["stale_fx_events_count"] = event_fx_freshness["stale_events_count"]
+        fx_quality["max_event_fx_age_days"] = event_fx_freshness["max_event_fx_age_days"]
         all_quarantine = brent_q + fx_q + fuel_q
 
         # Load source row counts and schema fingerprints for a complete provenance manifest.
@@ -1205,6 +1270,7 @@ def run_pipeline(
                 "fuel_market_panel_rows": len(panel_rows),
                 "stabilization_fund_annotations_applied": fund_annotations_applied,
                 "fuel_events_without_prior_market_observation": missing_prior_market,
+                "fx_event_freshness": event_fx_freshness,
                 "exact_duplicate_keys_collapsed": (
                     brent_quality["exact_duplicates_collapsed"]
                     + fx_quality["exact_duplicates_collapsed"]

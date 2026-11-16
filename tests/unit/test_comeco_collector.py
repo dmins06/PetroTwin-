@@ -305,10 +305,10 @@ def test_run_idempotent_when_up_to_date(monkeypatch, tmp_path):
     assert added == 0
 
 
-def test_run_appends_new_records_and_computes_price_changes(monkeypatch, tmp_path):
-    csv_file = tmp_path / "data_price_petro.csv"
-    # Seed historical records with prior prices
-    csv_file.write_text(
+def test_run_appends_new_records_without_inferring_unreported_price_changes(monkeypatch, tmp_path):
+    csv_file = tmp_path / "comeco_fuel_prices.csv"
+    # Seed historical records in the same directory
+    (tmp_path / "data_price_petro.csv").write_text(
         "date,effective_date,effective_time,product_name,price_vnd_per_liter,price_display,price_change_vnd,price_change_display,unit,includes_vat_and_environmental_tax,source_url,extracted_at_utc\n"
         "2026-10-22,2026-10-22,15:00,Xăng E10 RON 95-III,20000,20.000 đ,0,0,Đồng/lít thực tế,true,https://pvoil.com.vn/,2026-10-22T08:00:00Z\n"
         "2026-10-22,2026-10-22,15:00,Xăng E5 RON 92-II,19000,19.000 đ,0,0,Đồng/lít thực tế,true,https://pvoil.com.vn/,2026-10-22T08:00:00Z\n"
@@ -320,33 +320,157 @@ def test_run_appends_new_records_and_computes_price_changes(monkeypatch, tmp_pat
     # New announcement date 12/11/2026
     monkeypatch.setattr(comeco, "_fetch_html", lambda **kwargs: valid_comeco_html("12/11/2026"))
 
-    added = comeco.run()
+    added = comeco.run(current_date=date(2026, 11, 16))
     assert added == 4
 
-    rows = []
     with csv_file.open(newline="", encoding="utf-8") as fh:
         rows = list(csv.DictReader(fh))
 
-    assert len(rows) == 8  # 4 original + 4 new
-    new_rows = {r["product_name"]: r for r in rows[4:]}
+    assert len(rows) == 4
+    new_rows = {r["product_name"]: r for r in rows}
 
-    # Verify E10 RON 95-III: 19840 - 20000 = -160
     assert new_rows["Xăng E10 RON 95-III"]["price_vnd_per_liter"] == "19840"
-    assert new_rows["Xăng E10 RON 95-III"]["price_change_vnd"] == "-160"
+    assert new_rows["Xăng E10 RON 95-III"]["price_change_vnd"] == ""
+    assert new_rows["Xăng E10 RON 95-III"]["price_change_display"] == ""
     assert new_rows["Xăng E10 RON 95-III"]["source_url"] == "https://comeco.vn/"
 
-    # Verify E5 RON 92-II: 19390 - 19000 = +390
     assert new_rows["Xăng E5 RON 92-II"]["price_vnd_per_liter"] == "19390"
-    assert new_rows["Xăng E5 RON 92-II"]["price_change_vnd"] == "390"
-    assert new_rows["Xăng E5 RON 92-II"]["price_change_display"] == "+390"
+    assert new_rows["Xăng E5 RON 92-II"]["price_change_vnd"] == ""
+    assert new_rows["Xăng E5 RON 92-II"]["price_change_display"] == ""
 
-    # Verify DO 0,001S-V: 28620 - 28000 = +620
     assert new_rows["Dầu DO 0,001S-V"]["price_vnd_per_liter"] == "28620"
-    assert new_rows["Dầu DO 0,001S-V"]["price_change_vnd"] == "620"
+    assert new_rows["Dầu DO 0,001S-V"]["price_change_vnd"] == ""
 
-    # Verify DO 0,05S-II: 26820 - 26000 = +820
     assert new_rows["Dầu DO 0,05S-II"]["price_vnd_per_liter"] == "26820"
-    assert new_rows["Dầu DO 0,05S-II"]["price_change_vnd"] == "820"
+    assert new_rows["Dầu DO 0,05S-II"]["price_change_vnd"] == ""
+
+
+def test_iss02_no_previous_observation_leaves_price_change_null(monkeypatch, tmp_path):
+    """Regression (ISS-02): When no previous observation exists, price_change_vnd must be empty (NULL), not '0'."""
+    csv_file = tmp_path / "comeco_fuel_prices.csv"
+    monkeypatch.setattr(comeco, "_csv_path", lambda: csv_file)
+    monkeypatch.setattr(comeco, "_fetch_html", lambda **kwargs: valid_comeco_html("12/11/2026", "15:00"))
+
+    added = comeco.run(current_date=date(2026, 11, 16))
+    assert added == 4
+
+    with csv_file.open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+
+    assert len(rows) == 4
+    for r in rows:
+        assert r["price_change_vnd"] == ""
+        assert r["price_change_display"] == ""
+
+
+def test_iss02_previous_observation_from_pvoil_never_infers_price_change(monkeypatch, tmp_path):
+    """Regression (ISS-02): Previous observations from PVOIL must never be subtracted to infer COMECO price_change_vnd."""
+    csv_file = tmp_path / "comeco_fuel_prices.csv"
+    pvoil_file = tmp_path / "data_price_petro.csv"
+    pvoil_file.write_text(
+        "date,effective_date,effective_time,product_name,price_vnd_per_liter,price_display,price_change_vnd,price_change_display,unit,includes_vat_and_environmental_tax,source_url,extracted_at_utc\n"
+        "2026-10-22,2026-10-22,15:00,Xăng E10 RON 95-III,19490,19.490 đ,-120,-120,Đồng/lít thực tế,true,https://www.pvoil.com.vn/tin-gia-xang-dau,2026-10-22T08:00:00Z\n"
+        "2026-10-22,2026-10-22,15:00,Xăng E5 RON 92-II,19150,19.150 đ,-100,-100,Đồng/lít thực tế,true,https://www.pvoil.com.vn/tin-gia-xang-dau,2026-10-22T08:00:00Z\n"
+        "2026-10-22,2026-10-22,15:00,\"Dầu DO 0,001S-V\",24360,24.360 đ,-200,-200,Đồng/lít thực tế,true,https://www.pvoil.com.vn/tin-gia-xang-dau,2026-10-22T08:00:00Z\n"
+        "2026-10-22,2026-10-22,15:00,\"Dầu DO 0,05S-II\",23740,23.740 đ,-180,-180,Đồng/lít thực tế,true,https://www.pvoil.com.vn/tin-gia-xang-dau,2026-10-22T08:00:00Z\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(comeco, "_csv_path", lambda: csv_file)
+    monkeypatch.setattr(comeco, "_fetch_html", lambda **kwargs: valid_comeco_html("12/11/2026", "15:00"))
+
+    added = comeco.run(current_date=date(2026, 11, 16))
+    assert added == 4
+
+    with csv_file.open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+
+    for r in rows:
+        assert r["price_change_vnd"] == ""
+        assert r["price_change_display"] == ""
+
+
+def test_iss02_non_consecutive_adjustment_cycles_never_infers_multi_cycle_delta(monkeypatch, tmp_path):
+    """Regression (ISS-02): When intermediate adjustment cycles are missing (e.g. 2026-10-29 and 2026-11-05),
+    COMECO must not compute a multi-cycle delta against an older COMECO observation."""
+    csv_file = tmp_path / "comeco_fuel_prices.csv"
+    csv_file.write_text(
+        "date,effective_date,effective_time,product_name,price_vnd_per_liter,price_display,price_change_vnd,price_change_display,unit,includes_vat_and_environmental_tax,source_url,extracted_at_utc\n"
+        "2026-10-22,2026-10-22,15:00,Xăng E10 RON 95-III,19490,19.490 đ,,,Đồng/lít thực tế,true,https://comeco.vn/,2026-10-22T08:00:00Z\n"
+        "2026-10-22,2026-10-22,15:00,Xăng E5 RON 92-II,19150,19.150 đ,,,Đồng/lít thực tế,true,https://comeco.vn/,2026-10-22T08:00:00Z\n"
+        "2026-10-22,2026-10-22,15:00,\"Dầu DO 0,001S-V\",24360,24.360 đ,,,Đồng/lít thực tế,true,https://comeco.vn/,2026-10-22T08:00:00Z\n"
+        "2026-10-22,2026-10-22,15:00,\"Dầu DO 0,05S-II\",23740,23.740 đ,,,Đồng/lít thực tế,true,https://comeco.vn/,2026-10-22T08:00:00Z\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(comeco, "_csv_path", lambda: csv_file)
+    monkeypatch.setattr(comeco, "_fetch_html", lambda **kwargs: valid_comeco_html("12/11/2026", "15:00"))
+
+    added = comeco.run(current_date=date(2026, 11, 16))
+    assert added == 4
+
+    with csv_file.open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+
+    assert len(rows) == 8
+    for r in rows[4:]:
+        assert r["effective_date"] == "2026-11-12"
+        assert r["price_change_vnd"] == ""
+        assert r["price_change_display"] == ""
+
+
+def test_iss02_missing_historical_product_observations_leaves_price_change_null(monkeypatch, tmp_path):
+    """Regression (ISS-02): When historical data only contains a partial subset of products,
+    all products with unreported changes must still have empty price_change_vnd."""
+    csv_file = tmp_path / "comeco_fuel_prices.csv"
+    csv_file.write_text(
+        "date,effective_date,effective_time,product_name,price_vnd_per_liter,price_display,price_change_vnd,price_change_display,unit,includes_vat_and_environmental_tax,source_url,extracted_at_utc\n"
+        "2026-11-05,2026-11-05,15:00,Xăng E5 RON 92-II,19000,19.000 đ,,,Đồng/lít thực tế,true,https://comeco.vn/,2026-11-05T08:00:00Z\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(comeco, "_csv_path", lambda: csv_file)
+    monkeypatch.setattr(comeco, "_fetch_html", lambda **kwargs: valid_comeco_html("12/11/2026", "15:00"))
+
+    added = comeco.run(current_date=date(2026, 11, 16))
+    assert added == 4
+
+    with csv_file.open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+
+    for r in rows[1:]:
+        assert r["price_change_vnd"] == ""
+        assert r["price_change_display"] == ""
+
+
+def test_iss02_source_reported_vs_unreported_price_changes():
+    """Regression (ISS-02): _build_csv_rows writes price_change_vnd only when explicitly reported in the record,
+    and leaves it empty when unreported, even if previous_prices is passed."""
+    records = [
+        {"product_name": "Xăng E10 RON 95-III", "price": 19840, "price_change_vnd": 350},
+        {"product_name": "Xăng E5 RON 92-II", "price": 19390, "price_change_vnd": -120},
+        {"product_name": "Dầu DO 0,001S-V", "price": 28620, "price_change_vnd": 0},
+        {"product_name": "Dầu DO 0,05S-II", "price": 26820},  # Unreported
+    ]
+    previous_prices = {
+        comeco._normalize_name_for_lookup("Xăng E10 RON 95-III"): 10000,
+        comeco._normalize_name_for_lookup("Dầu DO 0,05S-II"): 20000,
+    }
+    rows = comeco._build_csv_rows(
+        announcement_date=date(2026, 11, 12),
+        effective_time="15:00",
+        price_records=records,
+        extracted_at="2026-11-16T08:33:01Z",
+        previous_prices=previous_prices,
+    )
+    by_product = {r["product_name"]: r for r in rows}
+
+    assert by_product["Xăng E10 RON 95-III"]["price_change_vnd"] == "350"
+    assert by_product["Xăng E10 RON 95-III"]["price_change_display"] == "+350"
+    assert by_product["Xăng E5 RON 92-II"]["price_change_vnd"] == "-120"
+    assert by_product["Xăng E5 RON 92-II"]["price_change_display"] == "-120"
+    assert by_product["Dầu DO 0,001S-V"]["price_change_vnd"] == "0"
+    assert by_product["Dầu DO 0,001S-V"]["price_change_display"] == "0"
+    # Unreported product must be empty even though previous_prices had an entry for it
+    assert by_product["Dầu DO 0,05S-II"]["price_change_vnd"] == ""
+    assert by_product["Dầu DO 0,05S-II"]["price_change_display"] == ""
 
 
 def test_run_lock_busy_returns_zero(monkeypatch, tmp_path):

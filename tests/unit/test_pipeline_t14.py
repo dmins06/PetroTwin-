@@ -580,3 +580,228 @@ def test_fx_optional_stale_with_unrelated_quarantine(tmp_path):
     assert quality["integrated"]["quarantined_rows"] == 1
     assert quality["source_checks"]["brent"]["quarantined_rows"] == 1
     assert quality["source_checks"]["usd_vnd"]["quarantined_rows"] == 0
+
+
+def test_iss03_event_level_fx_freshness_detects_stale_event_when_latest_fx_is_fresh(tmp_path):
+    """Regression (ISS-03): When FX has a gap (e.g. 2026-10-22 then 2026-11-16) and a fuel event
+    occurs on 2026-11-12, the pipeline must:
+    1. Join 2026-11-12 strictly to 2026-10-22 (no look-ahead leakage from 2026-11-16).
+    2. Preserve fx_observation_date, fx_age_days (21), fx_source_id, and fx_snapshot_id in fuel_market_panel.csv.
+    3. Identify the 2026-11-12 event as having stale FX (21 > max_age_days=7) in event_freshness even though
+       the latest FX file date (2026-11-16) has age_days=0.
+    """
+    raw_dir, processed_dir, log_dir, cfg = _setup_base_pipeline(tmp_path)
+    coll_cfg = tmp_path / "collectors.yaml"
+    coll_cfg.write_text("fx:\n  optional: true\n  max_age_days: 7\n", encoding="utf-8")
+
+    # Write fuel event on 2026-11-12
+    with (raw_dir / pipeline.FUEL_FILE).open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(pipeline.EXPECTED_HEADERS[pipeline.FUEL_FILE])
+        w.writerow([
+            "2026-11-12", "2026-11-12", "15:00", "Xăng RON 95-III", "21000", "21.000 đ", "",
+            "", "Đồng/lít thực tế", "true", "https://comeco.vn/", "2026-11-12T08:00:00Z",
+        ])
+
+    # Write FX with a 25-day gap: 2026-10-22 and 2026-11-16
+    write_fx(raw_dir / pipeline.FX_FILE, [
+        valid_fx_row("2026-10-22"),
+        valid_fx_row("2026-11-16"),
+    ])
+
+    quality = pipeline.run_pipeline(
+        raw_dir, processed_dir, log_dir, cfg,
+        collectors_config_path=coll_cfg,
+        current_date=date(2026, 11, 16),
+    )
+
+    fx_check = quality["source_checks"]["usd_vnd"]
+    assert fx_check["latest_observation_date"] == "2026-11-16"
+    assert fx_check["age_days"] == 0
+    assert fx_check["stale_fx_events_count"] == 1
+    assert fx_check["max_event_fx_age_days"] == 21
+
+    ev_fresh = fx_check["event_freshness"]
+    assert ev_fresh["max_age_days"] == 7
+    assert ev_fresh["events_evaluated"] == 1
+    assert ev_fresh["fresh_events_count"] == 0
+    assert ev_fresh["stale_events_count"] == 1
+    assert ev_fresh["has_stale_events"] is True
+    assert len(ev_fresh["stale_events"]) == 1
+    assert ev_fresh["stale_events"][0]["fx_observation_date"] == "2026-10-22"
+    assert ev_fresh["stale_events"][0]["fx_age_days"] == 21
+    assert ev_fresh["stale_events"][0]["fx_source_id"] == "algolab_sbv_central_rate"
+    assert ev_fresh["stale_events"][0]["fx_snapshot_id"] != ""
+
+    # Verify panel row preserves fx_observation_date, fx_age_days, fx_source_id, fx_snapshot_id and has no look-ahead
+    panel_path = processed_dir / "runs" / quality["run_id"] / "fuel_market_panel.csv"
+    with panel_path.open(newline="", encoding="utf-8") as fh:
+        panel_rows = list(csv.DictReader(fh))
+    assert len(panel_rows) == 1
+    assert panel_rows[0]["fx_observation_date"] == "2026-10-22"
+    assert panel_rows[0]["fx_age_days"] == "21"
+    assert panel_rows[0]["fx_source_id"] == "algolab_sbv_central_rate"
+    assert panel_rows[0]["fx_snapshot_id"] == pipeline._sha256(raw_dir / pipeline.FX_FILE)
+
+
+def test_iss03_event_fx_freshness_rejects_look_ahead_observation():
+    """Regression (ISS-03): _assess_event_fx_freshness must fail closed if fx_observation_date >= event_date."""
+    with pytest.raises(pipeline.PipelineError, match="look-ahead FX observation"):
+        pipeline._assess_event_fx_freshness([
+            {
+                "product_id": "gasoline_e10_ron95_iii",
+                "effective_at_local": "2026-11-12T15:00:00+07:00",
+                "fx_observation_date": "2026-11-12",
+                "fx_age_days": 0,
+                "fx_source_id": "algolab_sbv_central_rate",
+                "fx_snapshot_id": "abc",
+            }
+        ], fx_max_age_days=7)
+
+
+def test_iss01_gitignore_whitelists_canonical_raw_files_and_loader_rejects_dangling_current_json(tmp_path):
+    """Regression (ISS-01): Canonical raw CSVs (including comeco_fuel_prices.csv) must not be ignored by .gitignore,
+    temp/untracked run artifacts remain ignored, and prepare_bundle fails closed if current.json points to a missing run."""
+    import subprocess
+    from petrotwin.data import mysql_loader
+
+    repo_root = pipeline._repo_root()
+    must_not_ignore = [
+        "data/raw/README.md",
+        "data/raw/brent_crude_prices.csv",
+        "data/raw/usd_vnd_rates.csv",
+        "data/raw/data_price_petro.csv",
+        "data/raw/comeco_fuel_prices.csv",
+        "data/manual/stabilization_fund_annotations.csv",
+        "tests/fixtures/sample.csv",
+    ]
+    for rel_path in must_not_ignore:
+        res = subprocess.run(
+            ["git", "check-ignore", "-q", rel_path],
+            cwd=repo_root,
+            check=False,
+        )
+        assert res.returncode == 1, f"{rel_path} should NOT be ignored by .gitignore"
+
+    must_ignore = [
+        "data/raw/comeco_fuel_prices_tmp_12345.csv",
+        "data/raw/unrelated_scratch.csv",
+        "data/processed/runs/.staging_run/manifest.json",
+    ]
+    for rel_path in must_ignore:
+        res = subprocess.run(
+            ["git", "check-ignore", "-q", rel_path],
+            cwd=repo_root,
+            check=False,
+        )
+        assert res.returncode == 0, f"{rel_path} SHOULD be ignored by .gitignore"
+
+    # Verify prepare_bundle fails closed with LoadError when current.json references a missing run directory
+    proc_dir = tmp_path / "data" / "processed"
+    proc_dir.mkdir(parents=True)
+    (proc_dir / "current.json").write_text(
+        json.dumps({
+            "run_id": "deadbeef1234567890ab",
+            "path": "runs/deadbeef1234567890ab",
+            "schema_version": "petrotwin-data-v3",
+            "published_at_utc": "2026-11-16T08:55:01Z",
+        }),
+        encoding="utf-8",
+    )
+    with pytest.raises(mysql_loader.LoadError, match="current.json references missing run directory"):
+        mysql_loader.prepare_bundle(tmp_path)
+
+
+def test_pvoil_rows_without_source_url_in_data_price_petro_are_accepted_as_pvoil(tmp_path):
+    """Rows in data_price_petro.csv that have an empty source_url (when no specific URL was provided)
+    are assigned source_id='pvoil' and keep source_url='', while comeco_fuel_prices.csv still requires source_url."""
+    pvoil_file = tmp_path / pipeline.FUEL_FILE
+    with pvoil_file.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(pipeline.EXPECTED_HEADERS[pipeline.FUEL_FILE])
+        w.writerow([
+            "2026-10-29", "2026-10-29", "15:00", "Xăng E10 RON 95-III", "25730", "25.730 đ",
+            "870", "+870", "Đồng/lít thực tế", "true", "", "2026-11-16T17:13:24Z",
+        ])
+
+    rows, quarantine, _ = pipeline._parse_fuel(
+        pvoil_file, pipeline._sha256(pvoil_file), pipeline.EXPECTED_HEADERS[pipeline.FUEL_FILE]
+    )
+    assert len(rows) == 1
+    assert quarantine == []
+    assert rows[0]["source_id"] == "pvoil"
+    assert rows[0]["source_url"] == ""
+
+    comeco_file = tmp_path / pipeline.COMECO_FUEL_FILE
+    with comeco_file.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(pipeline.EXPECTED_HEADERS[pipeline.COMECO_FUEL_FILE])
+        w.writerow([
+            "2026-11-12", "2026-11-12", "15:00", "Xăng E10 RON 95-III", "19840", "19.840 đ",
+            "", "", "Đồng/lít thực tế", "true", "", "2026-11-16T08:33:01Z",
+        ])
+    with pytest.raises(pipeline.PipelineError, match="source_url is required"):
+        pipeline._parse_fuel(
+            comeco_file, pipeline._sha256(comeco_file), pipeline.EXPECTED_HEADERS[pipeline.COMECO_FUEL_FILE]
+        )
+
+
+def test_current_repo_raw_datasets_validate_end_to_end_in_isolated_temp_dir(tmp_path):
+    """Validate all current repository raw datasets end-to-end in an isolated tmp_path without
+    touching repository data/processed/*."""
+    import shutil
+    from petrotwin.data import mysql_loader
+
+    repo_root = pipeline._repo_root()
+    iso_repo = tmp_path / "iso_repo"
+    (iso_repo / "data" / "raw").mkdir(parents=True)
+    (iso_repo / "data" / "manual").mkdir(parents=True)
+    (iso_repo / "data" / "processed").mkdir(parents=True)
+    (iso_repo / "configs").mkdir(parents=True)
+
+    for fname in ("brent_crude_prices.csv", "usd_vnd_rates.csv", "data_price_petro.csv", "comeco_fuel_prices.csv"):
+        shutil.copy2(repo_root / "data" / "raw" / fname, iso_repo / "data" / "raw" / fname)
+    shutil.copy2(
+        repo_root / "data" / "manual" / "stabilization_fund_annotations.csv",
+        iso_repo / "data" / "manual" / "stabilization_fund_annotations.csv",
+    )
+    shutil.copy2(repo_root / "configs" / "default.yaml", iso_repo / "configs" / "default.yaml")
+    shutil.copy2(repo_root / "configs" / "collectors.yaml", iso_repo / "configs" / "collectors.yaml")
+
+    quality = pipeline.run_pipeline(
+        iso_repo / "data" / "raw",
+        iso_repo / "data" / "processed",
+        iso_repo / "data" / "interim" / "logs",
+        iso_repo / "configs" / "default.yaml",
+        iso_repo / "configs" / "collectors.yaml",
+        current_date=date(2026, 11, 16),
+    )
+    bundle = mysql_loader.prepare_bundle(iso_repo)
+
+    panel = bundle["outputs"]["fuel_market_panel.csv"]
+    comeco_panel = [r for r in panel if r["effective_at_local"] == "2026-11-12T15:00:00+07:00"]
+    assert len(comeco_panel) == 4
+    assert {r["product_id"] for r in comeco_panel} == {
+        "gasoline_e10_ron95_iii",
+        "gasoline_e5_ron92_ii",
+        "diesel_0001s_v",
+        "diesel_005s_ii",
+    }
+    for r in comeco_panel:
+        assert r["target_source_id"] == "comeco"
+        assert r["price_change_value"] == ""
+        assert r["brent_observation_date"] == "2026-11-11"
+        assert r["brent_age_days"] == "1"
+        assert r["fx_observation_date"] == "2026-11-11"
+        assert r["fx_age_days"] == "1"
+        assert r["fx_observation_date"] != "2026-11-16"
+
+    pvoil_oct29 = [r for r in panel if r["effective_at_local"] == "2026-10-29T15:00:00+07:00"]
+    pvoil_nov05 = [r for r in panel if r["effective_at_local"] == "2026-11-05T15:00:00+07:00"]
+    assert len(pvoil_oct29) == 4
+    assert len(pvoil_nov05) == 4
+    assert all(r["target_source_id"] == "pvoil" for r in pvoil_oct29 + pvoil_nov05)
+    assert quality["source_checks"]["brent"]["rows_canonical"] == 2146
+    assert quality["source_checks"]["usd_vnd"]["rows_canonical"] == 2417
+    assert quality["integrated"]["fuel_price_observation_rows"] == 1402
+    assert quality["integrated"]["fuel_market_panel_rows"] == 1402

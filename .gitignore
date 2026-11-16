@@ -18,8 +18,12 @@ __pycache__/
 htmlcov/
 
 # Data, generated forecasts, logs, and model artifacts
-data/raw/**
+data/raw/*
 !data/raw/README.md
+!data/raw/brent_crude_prices.csv
+!data/raw/usd_vnd_rates.csv
+!data/raw/data_price_petro.csv
+!data/raw/comeco_fuel_prices.csv
 data/interim/**
 !data/interim/README.md
 data/processed/**
@@ -29,8 +33,6 @@ logs/**
 *.joblib
 *.pkl
 *.parquet
-*.csv
-!data/manual/*.csv
 
 # Generated report assets
 reports/figures/generated/**

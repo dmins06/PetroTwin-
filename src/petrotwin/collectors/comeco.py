@@ -450,8 +450,16 @@ def _build_csv_rows(
     effective_time: str,
     price_records: list[dict[str, object]],
     extracted_at: str,
-    previous_prices: dict[str, int],
+    previous_prices: dict[str, int] | None = None,
 ) -> list[dict[str, str]]:
+    """Convert parsed COMECO records into CSV rows.
+
+    Never infer ``price_change_vnd`` from previous PVOIL or COMECO observations.
+    When the source does not explicitly report a price change, leave
+    ``price_change_vnd`` and ``price_change_display`` empty (NULL in downstream
+    tables).
+    """
+    _ = previous_prices  # Preserved in signature for caller compatibility; never used for inference.
     today_str = date.today().isoformat()
     eff_date_str = announcement_date.isoformat()
     rows: list[dict[str, str]] = []
@@ -459,11 +467,16 @@ def _build_csv_rows(
     for record in price_records:
         product = str(record["product_name"])
         price = int(record["price"])  # type: ignore[arg-type]
-        lookup_key = _normalize_name_for_lookup(product)
-        if lookup_key in previous_prices:
-            change = price - previous_prices[lookup_key]
+        reported_change = record.get("price_change_vnd")
+        if reported_change is not None and str(reported_change).strip() != "":
+            change_val = int(reported_change)  # type: ignore[arg-type]
+            change_str = str(change_val)
+            change_display = str(
+                record.get("price_change_display") or _format_change_display(change_val)
+            )
         else:
-            change = 0
+            change_str = ""
+            change_display = ""
 
         rows.append(
             {
@@ -473,8 +486,8 @@ def _build_csv_rows(
                 "product_name": product,
                 "price_vnd_per_liter": str(price),
                 "price_display": _format_price_display(price),
-                "price_change_vnd": str(change),
-                "price_change_display": _format_change_display(change),
+                "price_change_vnd": change_str,
+                "price_change_display": change_display,
                 "unit": UNIT,
                 "includes_vat_and_environmental_tax": INCLUDES_VAT,
                 "source_url": SOURCE_URL,
@@ -634,8 +647,7 @@ def run(current_date: date | None = None) -> int:
             )
             return 0
 
-        prev_prices = _get_latest_prices_by_product(csv_path)
-        csv_rows = _build_csv_rows(eff_date, eff_time, price_records, extracted_at, prev_prices)
+        csv_rows = _build_csv_rows(eff_date, eff_time, price_records, extracted_at)
 
         if not csv_rows:
             _log("no_new_rows", new_rows=0)
