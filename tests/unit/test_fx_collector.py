@@ -274,3 +274,461 @@ def test_provenance_is_provider_declared(monkeypatch, tmp_path):
     assert "provenance_status=provider_declared" in content
     assert "upstream=State Bank of Vietnam" in content
     assert "provider=Algolab" in content
+
+def algolab_jsonld_html(
+    rate="25.639",
+    observation_date="16/11/2026",
+    date_modified="2026-11-16",
+    source="GSO / SBV",
+    unit="VND",
+):
+    description = (
+        f"Tỷ giá USD: Tỷ giá SBV trung tâm — số liệu theo ngày "
+        f"của Việt Nam, đơn vị VND. Mới nhất {rate} VND "
+        f"({observation_date}). Nguồn: {source}."
+    )
+    dataset = {
+        "@context": "https://schema.org",
+        "@type": "Dataset",
+        "name": "Tỷ giá USD: Tỷ giá SBV trung tâm (Việt Nam)",
+        "description": description,
+        "dateModified": date_modified,
+        "variableMeasured": {
+            "@type": "PropertyValue",
+            "name": "Tỷ giá USD: Tỷ giá SBV trung tâm",
+            "unitText": unit,
+        },
+        "isBasedOn": {
+            "@type": "CreativeWork",
+            "name": source,
+        },
+    }
+    import json
+
+    return f"""
+    <html lang="vi">
+      <head>
+        <script type="application/ld+json">{json.dumps(dataset, ensure_ascii=False)}</script>
+      </head>
+      <body>
+        <h1>Tỷ giá USD: Tỷ giá SBV trung tâm</h1>
+        <div>25,639</div>
+        <div>16/11/2026</div>
+      </body>
+    </html>
+    """
+
+
+def test_algolab_jsonld_dataset_is_parsed(monkeypatch):
+    monkeypatch.setattr(fx, "date", type("FrozenDate", (date,), {
+        "today": classmethod(lambda cls: date(2026, 11, 16))
+    }))
+    assert fx._parse_algolab_html(algolab_jsonld_html()) == (
+        25639,
+        date(2026, 11, 16),
+    )
+
+
+@pytest.mark.parametrize("html", [
+    algolab_jsonld_html(source="Vietcombank"),
+    algolab_jsonld_html(unit="USD"),
+    algolab_jsonld_html(date_modified="2026-11-15"),
+])
+def test_algolab_jsonld_invalid_metadata_fails_closed(monkeypatch, html):
+    monkeypatch.setattr(fx, "date", type("FrozenDate", (date,), {
+        "today": classmethod(lambda cls: date(2026, 11, 16))
+    }))
+    with pytest.raises(fx.FXSourceSchemaError):
+        fx._parse_algolab_html(html)
+
+
+def test_algolab_tv_symbol_validation_accepts_sbv_and_rejects_commercial():
+    valid_meta = {
+        "name": "VN_FX_RATE_TY_GIA_SBV_TRUNG_TAM",
+        "ticker": "VN_FX_RATE_TY_GIA_SBV_TRUNG_TAM",
+        "description": "Tỷ giá USD: Tỷ giá SBV trung tâm (VND)",
+        "type": "economy",
+    }
+    fx._validate_algolab_tv_symbol(valid_meta)
+
+    with pytest.raises(fx.FXSourceSchemaError):
+        fx._validate_algolab_tv_symbol({
+            "name": "VN_FX_RATE_TY_GIA_SBV_TRUNG_TAM",
+            "ticker": "VN_FX_RATE_TY_GIA_SBV_TRUNG_TAM",
+            "description": "Tỷ giá USD: Vietcombank",
+            "type": "economy",
+        })
+
+
+def test_fx_backfill_recovers_missing_dates_preserves_existing_and_reports_unrecoverable(monkeypatch, tmp_path):
+    import csv
+    from datetime import datetime, timezone
+
+    verified_config(monkeypatch, tmp_path)
+    csv_path = tmp_path / "usd_vnd_rates.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fx.COLUMNS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows([
+            {
+                "date": "2026-10-22",
+                "base_currency": "USD",
+                "quote_currency": "VND",
+                "rate_vnd_per_usd": "25632",
+                "unit": fx.UNIT,
+                "rate_type": fx.RATE_TYPE,
+                "source_url": fx.ALGOLAB_URL,
+                "source_attribution": "Algolab page identifies source as GSO / State Bank of Vietnam (SBV)",
+                "source_value": "25,632",
+                "extracted_at_utc": "2026-10-23T06:02:10Z",
+            },
+            {
+                "date": "2026-10-28",
+                "base_currency": "USD",
+                "quote_currency": "VND",
+                "rate_vnd_per_usd": "25631",
+                "unit": fx.UNIT,
+                "rate_type": fx.RATE_TYPE,
+                "source_url": fx.ALGOLAB_URL,
+                "source_attribution": "provider=Algolab; source_id=algolab_sbv_central_rate; upstream=State Bank of Vietnam; provenance_status=provider_declared",
+                "source_value": "25,631",
+                "extracted_at_utc": "2026-10-28T09:00:00Z",
+            },
+        ])
+
+    monkeypatch.setattr(fx, "_csv_path", lambda: csv_path)
+    # Upstream returns 2026-10-22, 2026-10-23, 2026-10-27, 2026-10-28 (2026-10-26 is absent -> holiday/unrecoverable)
+    monkeypatch.setattr(
+        fx,
+        "_fetch_history_with_retries",
+        lambda start, end, include_saturdays=False: [
+            (date(2026, 10, 22), 25632),
+            (date(2026, 10, 23), 25627),
+            (date(2026, 10, 27), 25633),
+            (date(2026, 10, 28), 25631),
+        ],
+    )
+
+    # 1. Dry-run does not modify the CSV
+    before = csv_path.read_bytes()
+    dry_res = fx.backfill(start_date=date(2026, 10, 22), end_date=date(2026, 10, 28), dry_run=True)
+    assert [r["date"] for r in dry_res["recovered_rows"]] == ["2026-10-23", "2026-10-27"]
+    assert dry_res["unrecoverable_dates"] == ["2026-10-26"]
+    assert csv_path.read_bytes() == before
+
+    # 2. Write backfill inserts missing rows in chronological order without overwriting existing rows
+    res = fx.backfill(start_date=date(2026, 10, 22), end_date=date(2026, 10, 28), dry_run=False)
+    assert [r["date"] for r in res["recovered_rows"]] == ["2026-10-23", "2026-10-27"]
+    assert res["unrecoverable_dates"] == ["2026-10-26"]
+
+    with csv_path.open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    assert [r["date"] for r in rows] == ["2026-10-22", "2026-10-23", "2026-10-27", "2026-10-28"]
+    # Existing 2026-10-22 row attribution and timestamp preserved verbatim
+    assert rows[0]["source_attribution"] == "Algolab page identifies source as GSO / State Bank of Vietnam (SBV)"
+    assert rows[0]["extracted_at_utc"] == "2026-10-23T06:02:10Z"
+    assert rows[1]["rate_vnd_per_usd"] == "25627"
+    assert "provenance_status=provider_declared" in rows[1]["source_attribution"]
+    assert rows[2]["rate_vnd_per_usd"] == "25633"
+
+    # 3. Repeated backfill is idempotent
+    after = csv_path.read_bytes()
+    res2 = fx.backfill(start_date=date(2026, 10, 22), end_date=date(2026, 10, 28), dry_run=False)
+    assert res2["recovered_rows"] == []
+    assert csv_path.read_bytes() == after
+
+
+def test_fx_run_catches_up_missed_working_days_and_is_idempotent(monkeypatch, tmp_path):
+    """Regression: When daily runs were missed (e.g. 2026-10-22 -> 2026-11-16), fx.run()
+    must automatically catch up the missed SBV working days alongside the latest rate."""
+    import csv
+
+    verified_config(monkeypatch, tmp_path)
+    csv_path = tmp_path / "usd_vnd_rates.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fx.COLUMNS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerow(
+            fx._build_csv_row(
+                date(2026, 10, 22),
+                25632,
+                fx.ALGOLAB_URL,
+                "2026-10-23T06:02:10Z",
+            )
+        )
+
+    monkeypatch.setattr(fx, "_csv_path", lambda: csv_path)
+    monkeypatch.setattr(
+        fx,
+        "date",
+        type("FrozenDate", (date,), {"today": classmethod(lambda cls: date(2026, 11, 16))}),
+    )
+    monkeypatch.setattr(fx, "_fetch_with_retries", lambda: (25639, date(2026, 11, 16)))
+    monkeypatch.setattr(
+        fx,
+        "_fetch_history_with_retries",
+        lambda start, end, include_saturdays=False: [
+            (date(2026, 11, 11), 25611),
+            (date(2026, 11, 12), 25623),
+            (date(2026, 11, 13), 25637),
+            (date(2026, 11, 16), 25639),
+        ],
+    )
+
+    added = fx.run()
+    assert added == 4
+
+    with csv_path.open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    assert [r["date"] for r in rows] == [
+        "2026-10-22",
+        "2026-11-11",
+        "2026-11-12",
+        "2026-11-13",
+        "2026-11-16",
+    ]
+    assert [r["rate_vnd_per_usd"] for r in rows] == ["25632", "25611", "25623", "25637", "25639"]
+
+    # Repeated run is idempotent
+    after = csv_path.read_bytes()
+    assert fx.run() == 0
+    assert csv_path.read_bytes() == after
+
+
+def test_fx_run_degrades_without_advancing_date_on_history_failure_and_recovers_on_retry(monkeypatch, tmp_path):
+    """Fail-closed catch-up: when history catch-up times out, fx.run() preserves CSV and last_date,
+    logs history_catchup_degraded, exits 1, and recovers all missing dates on the next run."""
+    import csv
+
+    verified_config(monkeypatch, tmp_path)
+    csv_path = tmp_path / "usd_vnd_rates.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fx.COLUMNS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerow(
+            fx._build_csv_row(
+                date(2026, 10, 22),
+                25632,
+                fx.ALGOLAB_URL,
+                "2026-10-23T06:02:10Z",
+            )
+        )
+    before_bytes = csv_path.read_bytes()
+
+    monkeypatch.setattr(fx, "_csv_path", lambda: csv_path)
+    monkeypatch.setattr(
+        fx,
+        "date",
+        type("FrozenDate", (date,), {"today": classmethod(lambda cls: date(2026, 11, 16))}),
+    )
+    monkeypatch.setattr(fx, "_fetch_with_retries", lambda: (25639, date(2026, 11, 16)))
+
+    events = []
+    orig_log = fx._log
+    monkeypatch.setattr(fx, "_log", lambda ev, **kw: (events.append((ev, kw)), orig_log(ev, **kw)))
+
+    # Attempt 1: history endpoint times out -> fail closed, CSV unchanged, last_date remains 2026-10-22
+    monkeypatch.setattr(
+        fx,
+        "_fetch_history_with_retries",
+        lambda *args, **kwargs: (_ for _ in ()).throw(requests.Timeout("history timeout")),
+    )
+    with pytest.raises(SystemExit) as exc:
+        fx.run()
+    assert exc.value.code == 1
+    assert csv_path.read_bytes() == before_bytes
+    assert fx._last_date_in_csv(csv_path) == date(2026, 10, 22)
+    degraded = [kw for ev, kw in events if ev == "history_catchup_degraded"]
+    assert len(degraded) == 1
+    assert degraded[0]["reason"] == "history_catchup_failed"
+    assert degraded[0]["preserved_last_date"] == "2026-10-22"
+
+    # Attempt 2: history endpoint succeeds -> catches up missed working days + observation_date
+    monkeypatch.setattr(
+        fx,
+        "_fetch_history_with_retries",
+        lambda start, end, include_saturdays=False: [
+            (date(2026, 11, 11), 25611),
+            (date(2026, 11, 12), 25623),
+            (date(2026, 11, 13), 25637),
+            (date(2026, 11, 16), 25639),
+        ],
+    )
+    added = fx.run()
+    assert added == 4
+    with csv_path.open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    assert [r["date"] for r in rows] == [
+        "2026-10-22",
+        "2026-11-11",
+        "2026-11-12",
+        "2026-11-13",
+        "2026-11-16",
+    ]
+    assert [r["rate_vnd_per_usd"] for r in rows] == ["25632", "25611", "25623", "25637", "25639"]
+
+    # Attempt 3: idempotent repeat
+    after_recovery = csv_path.read_bytes()
+    assert fx.run() == 0
+    assert csv_path.read_bytes() == after_recovery
+
+
+@pytest.mark.parametrize("history_payload", [
+    [],  # empty / no_data
+    [(date(2026, 11, 11), 25611), (date(2026, 11, 12), 25623)],  # missing observation_date 2026-11-16
+])
+def test_fx_run_rejects_incomplete_history_missing_observation_date_or_empty(
+    monkeypatch, tmp_path, history_payload
+):
+    """Incomplete history responses (empty/no_data or missing confirmed observation_date) must fail
+    closed without modifying CSV or advancing last_date."""
+    import csv
+
+    verified_config(monkeypatch, tmp_path)
+    csv_path = tmp_path / "usd_vnd_rates.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fx.COLUMNS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerow(
+            fx._build_csv_row(
+                date(2026, 10, 22),
+                25632,
+                fx.ALGOLAB_URL,
+                "2026-10-23T06:02:10Z",
+            )
+        )
+    before_bytes = csv_path.read_bytes()
+
+    monkeypatch.setattr(fx, "_csv_path", lambda: csv_path)
+    monkeypatch.setattr(
+        fx,
+        "date",
+        type("FrozenDate", (date,), {"today": classmethod(lambda cls: date(2026, 11, 16))}),
+    )
+    monkeypatch.setattr(fx, "_fetch_with_retries", lambda: (25639, date(2026, 11, 16)))
+    monkeypatch.setattr(
+        fx,
+        "_fetch_history_with_retries",
+        lambda start, end, include_saturdays=False: history_payload,
+    )
+
+    events = []
+    orig_log = fx._log
+    monkeypatch.setattr(fx, "_log", lambda ev, **kw: (events.append((ev, kw)), orig_log(ev, **kw)))
+
+    with pytest.raises(SystemExit) as exc:
+        fx.run()
+    assert exc.value.code == 1
+    assert csv_path.read_bytes() == before_bytes
+    degraded = [kw for ev, kw in events if ev == "history_catchup_degraded"]
+    assert len(degraded) == 1
+    assert degraded[0]["reason"] == "incomplete_history_response"
+
+
+def test_fx_run_fails_closed_on_rate_conflict_between_html_and_history(monkeypatch, tmp_path):
+    """When HTML and UDF history disagree on observation_date's rate, fx.run() must fail closed
+    without swallowing FXSourceSchemaError or modifying CSV."""
+    import csv
+
+    verified_config(monkeypatch, tmp_path)
+    csv_path = tmp_path / "usd_vnd_rates.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fx.COLUMNS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerow(
+            fx._build_csv_row(
+                date(2026, 10, 22),
+                25632,
+                fx.ALGOLAB_URL,
+                "2026-10-23T06:02:10Z",
+            )
+        )
+    before_bytes = csv_path.read_bytes()
+
+    monkeypatch.setattr(fx, "_csv_path", lambda: csv_path)
+    monkeypatch.setattr(
+        fx,
+        "date",
+        type("FrozenDate", (date,), {"today": classmethod(lambda cls: date(2026, 11, 16))}),
+    )
+    monkeypatch.setattr(fx, "_fetch_with_retries", lambda: (25639, date(2026, 11, 16)))
+    monkeypatch.setattr(
+        fx,
+        "_fetch_history_with_retries",
+        lambda start, end, include_saturdays=False: [
+            (date(2026, 11, 13), 25637),
+            (date(2026, 11, 16), 25700),  # Conflicts with HTML 25639!
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        fx.run()
+    assert exc.value.code == 1
+    assert csv_path.read_bytes() == before_bytes
+
+
+def test_parse_algolab_tv_history_rejects_conflicting_duplicates_and_invalid_values(monkeypatch):
+    """_parse_algolab_tv_history must fail closed on conflicting duplicates, out-of-range rates,
+    non-integer rates, future dates, and non-ok status."""
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr(
+        fx,
+        "date",
+        type("FrozenDate", (date,), {"today": classmethod(lambda cls: date(2026, 11, 16))}),
+    )
+    ts_nov12 = int(datetime(2026, 11, 12, tzinfo=timezone.utc).timestamp())
+    ts_nov17 = int(datetime(2026, 11, 17, tzinfo=timezone.utc).timestamp())
+
+    # 1. Non-ok status
+    with pytest.raises(fx.FXSourceSchemaError, match="invalid status"):
+        fx._parse_algolab_tv_history({"s": "error", "t": [], "c": []})
+
+    # 2. Conflicting duplicates for the same date
+    with pytest.raises(fx.FXSourceSchemaError, match="Conflicting Algolab UDF history values"):
+        fx._parse_algolab_tv_history({"s": "ok", "t": [ts_nov12, ts_nov12], "c": [25623, 25699]})
+
+    # 3. Non-integer rate
+    with pytest.raises(fx.FXSourceSchemaError, match="not an integer"):
+        fx._parse_algolab_tv_history({"s": "ok", "t": [ts_nov12], "c": [25623.5]})
+
+    # 4. Out-of-range rate
+    with pytest.raises(fx.FXSourceSchemaError, match="outside valid USD/VND range"):
+        fx._parse_algolab_tv_history({"s": "ok", "t": [ts_nov12], "c": [500]})
+
+    # 5. Future date
+    with pytest.raises(fx.FXSourceSchemaError, match="future date"):
+        fx._parse_algolab_tv_history({"s": "ok", "t": [ts_nov17], "c": [25639]})
+
+
+def test_insert_rows_chronologically_rejects_conflicting_duplicate_dates(tmp_path):
+    """_insert_rows_chronologically must fail closed on conflicting duplicate dates in input or vs CSV."""
+    import csv
+
+    csv_path = tmp_path / "usd_vnd_rates.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fx.COLUMNS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerow(
+            fx._build_csv_row(date(2026, 11, 11), 25611, fx.ALGOLAB_URL, "2026-11-16T00:00:00Z")
+        )
+    before_bytes = csv_path.read_bytes()
+
+    # Conflict between two new rows in input
+    with pytest.raises(fx.FXSourceSchemaError, match="Conflicting duplicate FX rows"):
+        fx._insert_rows_chronologically(
+            csv_path,
+            [
+                fx._build_csv_row(date(2026, 11, 12), 25623, fx.ALGOLAB_URL, "2026-11-16T00:00:00Z"),
+                fx._build_csv_row(date(2026, 11, 12), 25999, fx.ALGOLAB_URL, "2026-11-16T00:00:00Z"),
+            ],
+        )
+    assert csv_path.read_bytes() == before_bytes
+
+    # Conflict between new row and existing CSV row
+    with pytest.raises(fx.FXSourceSchemaError, match="Existing FX rate"):
+        fx._insert_rows_chronologically(
+            csv_path,
+            [fx._build_csv_row(date(2026, 11, 11), 25999, fx.ALGOLAB_URL, "2026-11-16T00:00:00Z")],
+        )
+    assert csv_path.read_bytes() == before_bytes

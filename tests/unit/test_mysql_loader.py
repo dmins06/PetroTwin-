@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -485,7 +486,7 @@ def _setup_disk_repo(tmp_path: Path, include_fx: bool = True, include_brent: boo
     ]
     fuel_rows = [
         ["2026-11-05", "2026-11-05", "15:00", "Xăng RON 95-III", "21000", "21.000 đ", "0",
-         "", "Đồng/lít thực tế", "true", "https://pvoil.com.vn", "2026-11-05T08:00:00Z"]
+         "", "Đồng/lít thực tế", "true", "https://comeco.vn/", "2026-11-05T08:00:00Z"]
     ]
     with fuel_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -526,7 +527,7 @@ def _setup_disk_repo(tmp_path: Path, include_fx: bool = True, include_brent: boo
         w.writerow([
             "gasoline_ron95_iii", "Xăng RON 95-III", "2026-11-05", "2026-11-05T15:00:00+07:00",
             "false", "21000", "VND/liter", "0", "0", "true", "0", "VND/liter",
-            "https://moit.gov.vn/notice1", "pvoil", fuel_hash, "https://pvoil.com.vn",
+            "https://moit.gov.vn/notice1", "comeco", fuel_hash, "https://comeco.vn/",
             "2026-11-05T08:00:00Z", "petrotwin-data-v3"
         ])
 
@@ -567,7 +568,7 @@ def _setup_disk_repo(tmp_path: Path, include_fx: bool = True, include_brent: boo
         w.writerow([
             "gasoline_ron95_iii", "Xăng RON 95-III", "2026-11-05", "2026-11-05T15:00:00+07:00",
             "21000", "0", "0", "0", "VND/liter", "https://moit.gov.vn/notice1", "VND/liter",
-            "pvoil", fuel_hash, "eia_fred", brent_hash, "2026-11-01", "100.5", "4", "USD/bbl",
+            "comeco", fuel_hash, "eia_fred", brent_hash, "2026-11-01", "100.5", "4", "USD/bbl",
             "algolab_sbv_central_rate", (fx_hash if include_fx else ""),
             ("2026-11-01" if include_fx else ""), ("25627" if include_fx else ""),
             ("4" if include_fx else ""), "VND/USD", "petrotwin-data-v3"
@@ -595,8 +596,8 @@ def _setup_disk_repo(tmp_path: Path, include_fx: bool = True, include_brent: boo
         })
     if include_fuel:
         sources_list.append({
-            "snapshot_id": fuel_hash, "source_id": "pvoil", "source_url": "https://pvoil.com.vn",
-            "publisher_or_attribution": "PVOIL", "license_reuse_terms": "terms",
+            "snapshot_id": fuel_hash, "source_id": "comeco", "source_url": "https://comeco.vn/",
+            "publisher_or_attribution": "COMECO", "license_reuse_terms": "terms",
             "retrieved_at_utc": "2026-11-05T08:00:00Z", "raw_filename": "data_price_petro.csv",
             "sha256": fuel_hash, "row_count": 1, "schema_fingerprint_sha256": fuel_fp,
         })
@@ -650,7 +651,7 @@ def test_prepare_bundle_accepts_valid_optional_fx_missing(tmp_path):
     assert bundle["manifest"]["run_id"] == "test_run_1"
     assert "algolab_sbv_central_rate" not in bundle["sources"]
     assert "eia_fred" in bundle["sources"]
-    assert "pvoil" in bundle["sources"]
+    assert "comeco" in bundle["sources"]
     assert bundle["quality"]["publication_status"] == "validated_with_optional_source_missing"
 
 
@@ -662,7 +663,7 @@ def test_prepare_bundle_rejects_missing_required_brent_provenance(tmp_path):
 
 def test_prepare_bundle_rejects_missing_required_fuel_provenance(tmp_path):
     repo = _setup_disk_repo(tmp_path, include_fx=False, include_fuel=False)
-    with pytest.raises(LoadError, match="missing required domestic fuel source 'pvoil' in manifest"):
+    with pytest.raises(LoadError, match="missing required domestic fuel source"):
         prepare_bundle(repo)
 
 
@@ -673,7 +674,7 @@ def test_existing_valid_fx_bundle_remains_accepted(valid_bundle):
     assert valid_bundle["manifest"]["run_id"] == "test_run_1"
     assert set(valid_bundle["sources"]).__contains__("algolab_sbv_central_rate")
     assert "eia_fred" in valid_bundle["sources"]
-    assert "pvoil" in valid_bundle["sources"]
+    assert "comeco" in valid_bundle["sources"]
 
 
 def queue_new_run(db: MockDB, bundle: dict[str, Any], current: dict[str, Any] | None = None) -> None:
@@ -729,3 +730,396 @@ def test_current_pointer_unchanged_when_publish_fails(valid_bundle, monkeypatch)
     assert db.rollback_called == 1
     assert db.commit_called == 0
     assert db.pointer_run_id == "existing_current_run"
+
+
+def test_historical_pvoil_bundle_passes_validation(valid_bundle):
+    """Historical runs with PVOIL source_id must remain valid without alteration."""
+    pvoil_bundle = copy.deepcopy(valid_bundle)
+    # Convert fuel source to historical PVOIL
+    comeco_src = pvoil_bundle["sources"].pop("comeco")
+    comeco_src["source_id"] = "pvoil"
+    comeco_src["publisher_or_attribution"] = "PVOIL"
+    comeco_src["source_url"] = "https://www.pvoil.com.vn/"
+    pvoil_bundle["sources"]["pvoil"] = comeco_src
+    pvoil_bundle["manifest"]["sources"] = list(pvoil_bundle["sources"].values())
+
+    # Both fuel observation and panel target_source_id match PVOIL
+    for row in pvoil_bundle["outputs"]["fuel_price_observation.csv"]:
+        row["source_id"] = "pvoil"
+        row["source_url"] = "https://www.pvoil.com.vn/"
+    for row in pvoil_bundle["outputs"]["fuel_market_panel.csv"]:
+        row["target_source_id"] = "pvoil"
+
+    validate_bundle(pvoil_bundle)
+    assert "pvoil" in pvoil_bundle["sources"]
+
+
+def test_pvoil_observation_linked_to_comeco_snapshot_is_rejected(valid_bundle):
+    """A PVOIL observation linked to a COMECO snapshot must be rejected."""
+    # Case A: in fuel_market_panel.csv
+    bad_panel_bundle = copy.deepcopy(valid_bundle)
+    assert "comeco" in bad_panel_bundle["sources"]
+    for row in bad_panel_bundle["outputs"]["fuel_market_panel.csv"]:
+        row["target_source_id"] = "pvoil"  # Snapshot belongs to 'comeco'
+
+    with pytest.raises(
+        LoadError,
+        match="target provenance mismatch: target_source_id 'pvoil' does not match snapshot source 'comeco'",
+    ):
+        validate_bundle(bad_panel_bundle)
+
+    # Case B: in fuel_price_observation.csv
+    bad_fuel_bundle = copy.deepcopy(valid_bundle)
+    for row in bad_fuel_bundle["outputs"]["fuel_price_observation.csv"]:
+        row["source_id"] = "pvoil"  # Snapshot belongs to 'comeco'
+
+    with pytest.raises(
+        LoadError,
+        match="source provenance mismatch: source_id 'pvoil' does not match snapshot source 'comeco'",
+    ):
+        validate_bundle(bad_fuel_bundle)
+
+
+def test_comeco_observation_linked_to_pvoil_snapshot_is_rejected(valid_bundle):
+    """A COMECO observation linked to a PVOIL snapshot must be rejected."""
+    base_pvoil = copy.deepcopy(valid_bundle)
+    comeco_src = base_pvoil["sources"].pop("comeco")
+    comeco_src["source_id"] = "pvoil"
+    comeco_src["publisher_or_attribution"] = "PVOIL"
+    comeco_src["source_url"] = "https://www.pvoil.com.vn/"
+    base_pvoil["sources"]["pvoil"] = comeco_src
+    base_pvoil["manifest"]["sources"] = list(base_pvoil["sources"].values())
+    for row in base_pvoil["outputs"]["fuel_price_observation.csv"]:
+        row["source_id"] = "pvoil"
+    for row in base_pvoil["outputs"]["fuel_market_panel.csv"]:
+        row["target_source_id"] = "pvoil"
+
+    # Case A: COMECO observation in panel linked to PVOIL snapshot
+    bad_panel = copy.deepcopy(base_pvoil)
+    bad_panel["outputs"]["fuel_market_panel.csv"][0]["target_source_id"] = "comeco"
+    with pytest.raises(
+        LoadError,
+        match="target provenance mismatch: target_source_id 'comeco' does not match snapshot source 'pvoil'",
+    ):
+        validate_bundle(bad_panel)
+
+    # Case B: COMECO observation in fuel_price_observation linked to PVOIL snapshot
+    bad_fuel = copy.deepcopy(base_pvoil)
+    bad_fuel["outputs"]["fuel_price_observation.csv"][0]["source_id"] = "comeco"
+    with pytest.raises(
+        LoadError,
+        match="source provenance mismatch: source_id 'comeco' does not match snapshot source 'pvoil'",
+    ):
+        validate_bundle(bad_fuel)
+
+
+def test_mixed_source_bundle_with_source_specific_snapshots_passes_validation(valid_bundle):
+    """A mixed-source run with distinct PVOIL and COMECO snapshots in manifest passes validation when each observation links to its matching snapshot."""
+    mixed_bundle = copy.deepcopy(valid_bundle)
+    comeco_snap = mixed_bundle["sources"]["comeco"]["snapshot_id"]
+    pvoil_snap = "b" * 64
+
+    # Add PVOIL source snapshot to manifest & sources
+    pvoil_src = copy.deepcopy(mixed_bundle["sources"]["comeco"])
+    pvoil_src["source_id"] = "pvoil"
+    pvoil_src["snapshot_id"] = pvoil_snap
+    pvoil_src["sha256"] = pvoil_snap
+    pvoil_src["raw_filename"] = "data_price_petro.csv"
+    pvoil_src["source_url"] = "https://pvoil.com.vn/tin-gia-xang-dau"
+    pvoil_src["publisher_or_attribution"] = "PVOIL"
+    mixed_bundle["sources"]["pvoil"] = pvoil_src
+    mixed_bundle["manifest"]["sources"].append(pvoil_src)
+
+    # Keep COMECO row pointing to COMECO snapshot, add PVOIL row pointing to PVOIL snapshot
+    pvoil_fuel_row = copy.deepcopy(mixed_bundle["outputs"]["fuel_price_observation.csv"][0])
+    pvoil_fuel_row["effective_at_local"] = "2026-10-22T15:00:00+07:00"
+    pvoil_fuel_row["source_record_date"] = "2026-10-22"
+    pvoil_fuel_row["source_id"] = "pvoil"
+    pvoil_fuel_row["snapshot_id"] = pvoil_snap
+    pvoil_fuel_row["source_url"] = "https://pvoil.com.vn/tin-gia-xang-dau"
+    mixed_bundle["outputs"]["fuel_price_observation.csv"].append(pvoil_fuel_row)
+
+    pvoil_panel_row = copy.deepcopy(mixed_bundle["outputs"]["fuel_market_panel.csv"][0])
+    pvoil_panel_row["effective_at_local"] = "2026-10-22T15:00:00+07:00"
+    pvoil_panel_row["source_record_date"] = "2026-10-22"
+    pvoil_panel_row["target_source_id"] = "pvoil"
+    pvoil_panel_row["target_snapshot_id"] = pvoil_snap
+    # Clear market features since 2026-10-22 is before 2026-11-01 brent/fx in fixture
+    pvoil_panel_row["brent_snapshot_id"] = ""
+    pvoil_panel_row["brent_observation_date"] = ""
+    pvoil_panel_row["brent_usd_per_barrel"] = ""
+    pvoil_panel_row["brent_age_days"] = ""
+    pvoil_panel_row["fx_snapshot_id"] = ""
+    pvoil_panel_row["fx_observation_date"] = ""
+    pvoil_panel_row["usd_vnd_rate"] = ""
+    pvoil_panel_row["fx_age_days"] = ""
+    mixed_bundle["outputs"]["fuel_market_panel.csv"].append(pvoil_panel_row)
+
+    mixed_bundle["quality"]["outputs"]["fuel_price_observation.csv"]["rows"] = 2
+    mixed_bundle["quality"]["outputs"]["fuel_market_panel.csv"]["rows"] = 2
+
+    validate_bundle(mixed_bundle)
+    assert mixed_bundle["outputs"]["fuel_market_panel.csv"][0]["target_snapshot_id"] == comeco_snap
+    assert mixed_bundle["outputs"]["fuel_market_panel.csv"][1]["target_snapshot_id"] == pvoil_snap
+
+
+def test_mysql_loader_accepts_and_publishes_multiple_source_observations_for_single_event(valid_bundle, monkeypatch):
+    """When PVOIL and COMECO both report identical observations for the same (product_id, effective_at_local),
+    fuel_price_observation.csv has 2 rows (with distinct snapshots) while fuel_market_panel.csv has 1 row.
+    Both validate_bundle() and publish() must accept and persist this relationship."""
+    monkeypatch.setenv("PETROTWIN_DB_PASSWORD", "mock_pass")
+    bundle = copy.deepcopy(valid_bundle)
+    comeco_snap = bundle["sources"]["comeco"]["snapshot_id"]
+    pvoil_snap = "c" * 64
+
+    # Add PVOIL source snapshot to manifest & sources
+    pvoil_src = copy.deepcopy(bundle["sources"]["comeco"])
+    pvoil_src["source_id"] = "pvoil"
+    pvoil_src["snapshot_id"] = pvoil_snap
+    pvoil_src["sha256"] = pvoil_snap
+    pvoil_src["raw_filename"] = "data_price_petro.csv"
+    pvoil_src["source_url"] = "https://pvoil.com.vn/tin-gia-xang-dau"
+    pvoil_src["publisher_or_attribution"] = "PVOIL"
+    bundle["sources"]["pvoil"] = pvoil_src
+    bundle["manifest"]["sources"].append(pvoil_src)
+
+    # Add a second observation for the EXACT SAME (product_id, effective_at_local) from PVOIL
+    pvoil_fuel_row = copy.deepcopy(bundle["outputs"]["fuel_price_observation.csv"][0])
+    pvoil_fuel_row["source_id"] = "pvoil"
+    pvoil_fuel_row["snapshot_id"] = pvoil_snap
+    pvoil_fuel_row["source_url"] = "https://pvoil.com.vn/tin-gia-xang-dau"
+    bundle["outputs"]["fuel_price_observation.csv"].append(pvoil_fuel_row)
+
+    # fuel_price_observation.csv now has 2 rows, while fuel_market_panel.csv has 1 row!
+    assert len(bundle["outputs"]["fuel_price_observation.csv"]) == 2
+    assert len(bundle["outputs"]["fuel_market_panel.csv"]) == 1
+    bundle["quality"]["outputs"]["fuel_price_observation.csv"]["rows"] = 2
+    bundle["manifest"]["outputs"]["fuel_price_observation.csv"]["rows"] = 2
+
+    # 1. Offline validation passes
+    validate_bundle(bundle)
+
+    # 2. Transactional publish inserts 2 fuel_price_observation rows and 1 fuel_market_panel row
+    db = MockDB()
+    queue_new_run(db, bundle)
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: MockConnection(db))
+
+    msg = publish(bundle)
+    assert "fuel=2" in msg
+    assert "panel=1" in msg
+    assert db.commit_called == 1
+
+
+def test_publish_idempotent_when_already_published(valid_bundle, monkeypatch):
+    """When a run is already published and reconciling, publishing again is idempotent."""
+    monkeypatch.setenv("PETROTWIN_DB_PASSWORD", "mock_pass")
+    db = MockDB()
+    manifest = valid_bundle["manifest"]
+    quality = valid_bundle["quality"]
+    # Mock existing dataset_run
+    db.fetchone_queue.append({
+        "run_id": manifest["run_id"],
+        "schema_version": manifest["schema_version"],
+        "pipeline_version": manifest["pipeline_version"],
+        "pipeline_sha256": manifest["pipeline_sha256"],
+        "publication_status": quality["publication_status"],
+        "manifest_json": json.dumps(manifest),
+    })
+    # Mock existing quality_report
+    db.fetchone_queue.append({
+        "report_json": json.dumps(quality),
+    })
+    # Mock existing snapshots
+    db.fetchall_queue.append([
+        {"snapshot_id": s["snapshot_id"]} for s in valid_bundle["sources"].values()
+    ])
+    # Mock table count reconciliations
+    outputs = valid_bundle["outputs"]
+    for table, count in [
+        ("fuel_price_observation", len(outputs["fuel_price_observation.csv"])),
+        ("market_observation", len(outputs["market_observation.csv"])),
+        ("fuel_market_panel", len(outputs["fuel_market_panel.csv"])),
+        ("quarantine_record", len(outputs["quarantine.csv"])),
+        ("fund_annotation", len(valid_bundle["annotations"])),
+    ]:
+        db.fetchone_queue.append({"n": count})
+
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: MockConnection(db))
+
+    message = publish(valid_bundle)
+    assert "already exists and its data/metadata reconcile; no rows changed" in message
+    assert db.rollback_called == 1
+
+
+def test_mysql_connection_config_sets_explicit_timeouts(fake_pymysql, monkeypatch):
+    clear_db_env(monkeypatch)
+    monkeypatch.setenv("PETROTWIN_DB_CONNECT_TIMEOUT", "12")
+    monkeypatch.setenv("PETROTWIN_DB_READ_TIMEOUT", "45")
+    monkeypatch.setenv("PETROTWIN_DB_WRITE_TIMEOUT", "50")
+    config = _mysql_connection_config(fake_pymysql)
+    assert config["connect_timeout"] == 12
+    assert config["read_timeout"] == 45
+    assert config["write_timeout"] == 50
+
+
+def test_publish_emits_all_timing_logs_without_credentials_and_matches_pymysql_batching(
+    valid_bundle, monkeypatch, capsys
+):
+    """Verify all 17 required timing log stages are emitted with run_id/elapsed_seconds/rows,
+    no credentials are logged, and every executemany SQL matches PyMySQL RE_INSERT_VALUES."""
+    monkeypatch.setenv("PETROTWIN_DB_PASSWORD", "super_secret_password_123")
+    db = MockDB()
+    # Queue empty existing run, reference seeds, and post-insert counts
+    db.fetchone_queue.append(None)
+    db.fetchall_queue.append([{"product_id": p} for p in KNOWN_PRODUCTS])
+    db.fetchall_queue.append([{"series_id": s} for s in KNOWN_SERIES])
+    outputs = valid_bundle["outputs"]
+    for count in [
+        len(outputs["fuel_price_observation.csv"]),
+        len(outputs["market_observation.csv"]),
+        len(outputs["fuel_market_panel.csv"]),
+        len(outputs["quarantine.csv"]),
+        len(valid_bundle["annotations"]),
+    ]:
+        db.fetchone_queue.append({"n": count})
+    db.fetchone_queue.append(None)  # dataset_current_pointer
+
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: MockConnection(db))
+
+    publish(valid_bundle)
+    captured = capsys.readouterr().out
+    assert "super_secret_password_123" not in captured
+
+    events = [json.loads(line) for line in captured.splitlines() if line.strip()]
+    stages = [ev["stage"] for ev in events]
+    expected_stages = [
+        "mysql_loader.connect.start",
+        "mysql_loader.connect.completed",
+        "mysql_loader.transaction.started",
+        "mysql_loader.dataset_run.insert.completed",
+        "mysql_loader.source_snapshot.insert.completed",
+        "mysql_loader.reference_validation.completed",
+        "mysql_loader.market_observation.insert.completed",
+        "mysql_loader.fuel_price_observation.insert.completed",
+        "mysql_loader.fund_annotation.insert.completed",
+        "mysql_loader.fuel_market_panel.insert.completed",
+        "mysql_loader.quarantine_record.insert.completed",
+        "mysql_loader.quality_report.insert.completed",
+        "mysql_loader.reconciliation.completed",
+        "mysql_loader.pointer_update.completed",
+        "mysql_loader.commit.started",
+        "mysql_loader.commit.completed",
+        "mysql_loader.completed",
+    ]
+    assert stages == expected_stages
+    for ev in events:
+        assert ev["run_id"] == valid_bundle["manifest"]["run_id"]
+        assert isinstance(ev["elapsed_seconds"], float)
+        assert ev["ts"].endswith("Z")
+
+    # Every executemany INSERT must match PyMySQL's RE_INSERT_VALUES so it batches instead of 1-by-1
+    for sql, _params in db.executemany_queries:
+        if sql.lstrip().upper().startswith("INSERT"):
+            assert pymysql.cursors.RE_INSERT_VALUES.match(sql), f"SQL will not batch in PyMySQL: {sql}"
+
+
+def test_publish_chunks_large_inserts_into_500_row_batches(valid_bundle, monkeypatch):
+    """Verify _insert_many splits large row sets (e.g. 1,200 rows) into 500-row batches within one transaction."""
+    monkeypatch.setenv("PETROTWIN_DB_PASSWORD", "mock_pass")
+    large_bundle = copy.deepcopy(valid_bundle)
+    base_market_row = large_bundle["outputs"]["market_observation.csv"][0]
+    many_rows = []
+    for idx in range(1200):
+        row = copy.deepcopy(base_market_row)
+        # Distinct observation_date per row
+        day_num = idx % 28 + 1
+        month_num = (idx // 28) % 12 + 1
+        year_num = 2000 + (idx // (28 * 12))
+        row["observation_date"] = f"{year_num:04d}-{month_num:02d}-{day_num:02d}"
+        many_rows.append(row)
+    large_bundle["outputs"]["market_observation.csv"] = many_rows
+
+    db = MockDB()
+    db.fetchone_queue.append(None)
+    db.fetchall_queue.append([{"product_id": p} for p in KNOWN_PRODUCTS])
+    db.fetchall_queue.append([{"series_id": s} for s in KNOWN_SERIES])
+    outputs = large_bundle["outputs"]
+    for count in [
+        len(outputs["fuel_price_observation.csv"]),
+        len(outputs["market_observation.csv"]),
+        len(outputs["fuel_market_panel.csv"]),
+        len(outputs["quarantine.csv"]),
+        len(large_bundle["annotations"]),
+    ]:
+        db.fetchone_queue.append({"n": count})
+    db.fetchone_queue.append(None)
+
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: MockConnection(db))
+    msg = publish(large_bundle)
+    assert "market=1200" in msg
+    assert db.commit_called == 1
+
+    market_batches = [
+        len(params)
+        for sql, params in db.executemany_queries
+        if "INSERT INTO market_observation" in sql
+    ]
+    assert market_batches == [500, 500, 200]
+
+
+def test_publish_rolls_back_and_closes_on_connect_or_query_timeout(valid_bundle, monkeypatch):
+    """Verify connection timeout and query timeout propagate cleanly and close opened connections."""
+    monkeypatch.setenv("PETROTWIN_DB_PASSWORD", "mock_pass")
+
+    # 1. Connect timeout
+    monkeypatch.setattr(
+        pymysql,
+        "connect",
+        lambda **kwargs: (_ for _ in ()).throw(pymysql.err.OperationalError(2003, "connect timeout")),
+    )
+    with pytest.raises(pymysql.err.OperationalError, match="connect timeout"):
+        publish(valid_bundle)
+
+    # 2. Query timeout mid-insert -> rollback + close
+    db = MockDB()
+    db.fetchone_queue.append(None)
+    db.fetchall_queue.append([{"product_id": p} for p in KNOWN_PRODUCTS])
+    db.fetchall_queue.append([{"series_id": s} for s in KNOWN_SERIES])
+    db.raise_on_query_substr = "INSERT INTO fuel_market_panel"
+    db.error_to_raise = pymysql.err.OperationalError(2013, "Lost connection during query (read timeout)")
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: MockConnection(db))
+
+    with pytest.raises(pymysql.err.OperationalError, match="read timeout"):
+        publish(valid_bundle)
+    assert db.rollback_called == 1
+    assert db.close_called == 1
+    assert db.commit_called == 0
+    assert db.pointer_run_id is None
+
+
+def test_publish_existing_run_row_count_mismatch_fails_closed(valid_bundle, monkeypatch):
+    """When an existing run has a mismatched row count during reconciliation, loader refuses repair."""
+    monkeypatch.setenv("PETROTWIN_DB_PASSWORD", "mock_pass")
+    db = MockDB()
+    manifest = valid_bundle["manifest"]
+    quality = valid_bundle["quality"]
+    db.fetchone_queue.append({
+        "run_id": manifest["run_id"],
+        "schema_version": manifest["schema_version"],
+        "pipeline_version": manifest["pipeline_version"],
+        "pipeline_sha256": manifest["pipeline_sha256"],
+        "publication_status": quality["publication_status"],
+        "manifest_json": json.dumps(manifest),
+    })
+    db.fetchone_queue.append({"report_json": json.dumps(quality)})
+    db.fetchall_queue.append([
+        {"snapshot_id": s["snapshot_id"]} for s in valid_bundle["sources"].values()
+    ])
+    # First count (fuel_price_observation) mismatches by 1
+    db.fetchone_queue.append({"n": len(valid_bundle["outputs"]["fuel_price_observation.csv"]) + 1})
+
+    monkeypatch.setattr(pymysql, "connect", lambda **kwargs: MockConnection(db))
+    with pytest.raises(LoadError, match="existing run is incomplete: fuel_price_observation count mismatch"):
+        publish(valid_bundle)
+    assert db.rollback_called == 1
+    assert db.close_called == 1

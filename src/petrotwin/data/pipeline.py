@@ -31,6 +31,7 @@ UTC = timezone.utc
 BRENT_FILE = "brent_crude_prices.csv"
 FX_FILE = "usd_vnd_rates.csv"
 FUEL_FILE = "data_price_petro.csv"
+COMECO_FUEL_FILE = "comeco_fuel_prices.csv"
 
 PRODUCT_IDS = {
     "Dầu DO 0,005S-IV": "diesel_0005s_iv",
@@ -56,6 +57,11 @@ EXPECTED_HEADERS = {
         "rate_type", "source_url", "source_attribution", "source_value", "extracted_at_utc",
     ],
     FUEL_FILE: [
+        "date", "effective_date", "effective_time", "product_name", "price_vnd_per_liter",
+        "price_display", "price_change_vnd", "price_change_display", "unit",
+        "includes_vat_and_environmental_tax", "source_url", "extracted_at_utc",
+    ],
+    COMECO_FUEL_FILE: [
         "date", "effective_date", "effective_time", "product_name", "price_vnd_per_liter",
         "price_display", "price_change_vnd", "price_change_display", "unit",
         "includes_vat_and_environmental_tax", "source_url", "extracted_at_utc",
@@ -352,6 +358,66 @@ def _parse_effective_at(value_date: str, value_time: str, source: str, row_numbe
     return instant.isoformat(timespec="seconds"), normalized_24
 
 
+def _reconcile_cross_source_fuel(
+    rows: list[dict[str, Any]],
+    default_source_file: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, int]:
+    """Reconcile domestic fuel observations across sources on (product_id, effective_at_local, unit_code).
+
+    1. Identical prices: retain all valid source-specific observations in fuel_price_observation
+       with their original source_id, snapshot_id, and source_url intact; count cross-source
+       duplicates that will be collapsed when building fuel_market_panel.
+    2. Conflicting prices: record data-quality conflict, do not average or prioritize, quarantine both.
+    """
+    identity_groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        ident = (row["product_id"], row["effective_at_local"], row["unit_code"])
+        identity_groups.setdefault(ident, []).append(row)
+
+    cross_source_conflicts = 0
+    cross_source_duplicates = 0
+    canonical_output: list[dict[str, Any]] = []
+    quarantine_output: list[dict[str, Any]] = []
+
+    for ident, group in identity_groups.items():
+        if len(group) == 1:
+            canonical_output.append(group[0])
+            continue
+
+        prices = {r["price_value"] for r in group}
+        if len(prices) > 1:
+            cross_source_conflicts += len(group)
+            peer_refs = [
+                {
+                    "effective_at_local": r["effective_at_local"],
+                    "product_id": r["product_id"],
+                    "unit_code": r["unit_code"],
+                    "source_id": r["source_id"],
+                    "snapshot_id": r["snapshot_id"],
+                    "source_file": r.get("_source_file", default_source_file),
+                    "source_row_number": r.get("_source_row_number", 0),
+                    "price_value": r["price_value"],
+                    "source_url": r["source_url"],
+                }
+                for r in group
+            ]
+            for r in group:
+                raw_payload = {k: v for k, v in r.items() if not k.startswith("_")}
+                raw_payload["conflicting_observations"] = peer_refs
+                quarantine_output.append({
+                    "source_file": r.get("_source_file", default_source_file),
+                    "source_row_number": r.get("_source_row_number", 0),
+                    "reason_code": "cross_source_price_conflict",
+                    "raw_row_json": json.dumps(raw_payload, ensure_ascii=False, sort_keys=True),
+                })
+        else:
+            cross_source_duplicates += len(group) - 1
+            for r in group:
+                canonical_output.append(dict(r))
+
+    return canonical_output, quarantine_output, cross_source_duplicates, cross_source_conflicts
+
+
 def _parse_fuel(
     path: Path, snapshot_id: str, headers: list[str]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
@@ -390,7 +456,7 @@ def _parse_fuel(
             )
         if raw["unit"] != "Đồng/lít thực tế":
             raise PipelineError(f"{path.name} row {row_number}: unsupported fuel unit {raw['unit']!r}")
-        if not raw["source_url"].strip():
+        if not raw["source_url"].strip() and path.name != FUEL_FILE:
             raise PipelineError(f"{path.name} row {row_number}: source_url is required")
         retrieved_at = _parse_retrieved_at(raw["extracted_at_utc"], path.name, row_number)
         product_input_counts[product_id] += 1
@@ -444,7 +510,21 @@ def _parse_fuel(
             })
             continue
 
+        src_url = raw["source_url"].strip().lower()
+        if not src_url and path.name == FUEL_FILE:
+            row_source_id = "pvoil"
+        elif "comeco.vn" in src_url:
+            row_source_id = "comeco"
+        elif "pvoil" in src_url:
+            row_source_id = "pvoil"
+        else:
+            raise PipelineError(
+                f"{path.name} row {row_number}: unrecognized domestic fuel source_url {raw['source_url']!r}"
+            )
+
         output.append({
+            "_source_file": path.name,
+            "_source_row_number": row_number,
             "product_id": product_id,
             "source_product_name": product_name,
             "source_record_date": source_record_date.isoformat(),
@@ -453,13 +533,13 @@ def _parse_fuel(
             "price_value": _decimal_text(price),
             "unit_code": "VND/liter",
             "price_change_value": _decimal_text(change),
-            # PVOIL does not report stabilization-fund data; the annotation overlay fills it.
+            # Domestic fuel sources do not report stabilization-fund data; the annotation overlay fills it.
             "stabilization_fund_subsidy": "",
             "stabilization_fund_subsidy_amount": "",
             "stabilization_fund_subsidy_unit": "VND/liter" if product_id != "fuel_oil_35s" else "VND/kg",
             "stabilization_fund_source_url": "",
             "tax_included": tax_raw,
-            "source_id": "pvoil",
+            "source_id": row_source_id,
             "snapshot_id": snapshot_id,
             "source_url": raw["source_url"],
             "retrieved_at_utc": retrieved_at,
@@ -470,6 +550,16 @@ def _parse_fuel(
     key = ("product_id", "effective_at_local", "source_id", "snapshot_id")
     output, duplicate_keys = _dedupe_or_fail(output, key, path.name)
     exact_duplicates += duplicate_keys
+
+    output, conflict_quarantine, cross_source_duplicates, cross_source_conflicts = (
+        _reconcile_cross_source_fuel(output, path.name)
+    )
+    quarantine.extend(conflict_quarantine)
+    for q_row in conflict_quarantine:
+        q_raw = json.loads(q_row["raw_row_json"])
+        if "product_id" in q_raw:
+            product_quarantine_counts[q_raw["product_id"]] += 1
+
     per_product: dict[str, dict[str, Any]] = {}
     for product_id in sorted(product_input_counts):
         product_dates = sorted(product_effective_dates[product_id])
@@ -496,6 +586,8 @@ def _parse_fuel(
         "rows_read": len(raw_rows),
         "rows_canonical": len(output),
         "exact_duplicates_collapsed": exact_duplicates,
+        "cross_source_duplicates_collapsed": cross_source_duplicates,
+        "cross_source_price_conflicts": cross_source_conflicts,
         "missing_values": missing_values,
         "quarantined_rows": len(quarantine),
         "zero_prices_quarantined": zero_prices,
@@ -543,13 +635,16 @@ def _apply_fund_annotations(fuel_rows: list[dict[str, Any]], annotation_path: Pa
                 "source_url": source_url,
             }
 
-    target_counts = Counter(
-        (row["product_id"], row["source_record_date"]) for row in fuel_rows
-    )
+    distinct_events_by_key: dict[tuple[str, str], set[str]] = {}
+    for row in fuel_rows:
+        distinct_events_by_key.setdefault(
+            (row["product_id"], row["source_record_date"]), set()
+        ).add(row["effective_at_local"])
     for key in annotations:
-        if target_counts[key] == 0:
+        events = distinct_events_by_key.get(key, set())
+        if len(events) == 0:
             raise PipelineError(f"orphan fund annotation has no valid fuel event: {key}")
-        if target_counts[key] > 1:
+        if len(events) > 1:
             raise PipelineError(f"fund annotation matches multiple fuel events: {key}")
 
     count = 0
@@ -603,25 +698,46 @@ def _validate_integrated_outputs(
         raise PipelineError(
             f"market outputs are missing required series: {sorted(expected_series - observed_series)}"
         )
-    if len(panel_rows) != len(fuel_rows):
-        raise PipelineError(
-            f"panel cardinality mismatch: fuel={len(fuel_rows)}, panel={len(panel_rows)}"
-        )
 
     fuel_keys = {
         (row["product_id"], row["effective_at_local"], row["snapshot_id"])
+        for row in fuel_rows
+    }
+    fuel_provenance_keys = {
+        (row["product_id"], row["effective_at_local"], row["source_id"], row["snapshot_id"])
+        for row in fuel_rows
+    }
+    unique_fuel_events = {
+        (row["product_id"], row["effective_at_local"])
         for row in fuel_rows
     }
     panel_keys = [
         (row["product_id"], row["effective_at_local"], row["target_snapshot_id"])
         for row in panel_rows
     ]
-    if len(fuel_keys) != len(fuel_rows) or len(set(panel_keys)) != len(panel_keys):
+    panel_events = [
+        (row["product_id"], row["effective_at_local"])
+        for row in panel_rows
+    ]
+
+    if len(fuel_keys) != len(fuel_rows) or len(set(panel_keys)) != len(panel_keys) or len(set(panel_events)) != len(panel_events):
         raise PipelineError("duplicate event key in fuel or integrated panel outputs")
-    if set(panel_keys) != fuel_keys:
+    if len(panel_rows) != len(unique_fuel_events):
+        raise PipelineError(
+            f"panel cardinality mismatch: unique_fuel_events={len(unique_fuel_events)}, panel={len(panel_rows)}"
+        )
+    if not set(panel_keys).issubset(fuel_keys) or set(panel_events) != unique_fuel_events:
         raise PipelineError("panel keys do not match canonical fuel-price event keys")
 
     for row in panel_rows:
+        if (
+            row["product_id"],
+            row["effective_at_local"],
+            row["target_source_id"],
+            row["target_snapshot_id"],
+        ) not in fuel_provenance_keys:
+            raise PipelineError("panel row target provenance does not match any fuel observation")
+
         event_date = date.fromisoformat(row["effective_at_local"][:10])
         for prefix, date_field, value_field, age_field in (
             ("brent", "brent_observation_date", "brent_usd_per_barrel", "brent_age_days"),
@@ -647,10 +763,23 @@ def _manifest_entry(path: Path, source_id: str, publisher: str, fingerprint: str
         reader = csv.DictReader(stream)
         rows = list(reader)
     extracted = sorted({row.get("extracted_at_utc", "") for row in rows if row.get("extracted_at_utc")})
+    # If file contains mixed sources, pick matching source_url or canonical fallback
+    matching_urls = [r.get("source_url", "").strip() for r in rows if source_id in r.get("source_url", "").lower()]
+    if matching_urls:
+        source_url = matching_urls[-1]
+    elif rows and rows[0].get("source_url"):
+        source_url = rows[0].get("source_url", "").strip()
+    elif source_id == "comeco":
+        source_url = "https://comeco.vn/"
+    elif source_id == "pvoil":
+        source_url = "https://www.pvoil.com.vn/"
+    else:
+        source_url = ""
+
     return {
         "snapshot_id": _sha256(path),
         "source_id": source_id,
-        "source_url": rows[0].get("source_url", "") if rows else "",
+        "source_url": source_url,
         "publisher_or_attribution": publisher,
         "license_reuse_terms": "unknown; verify with publisher",
         "retrieved_at_utc": extracted[0] if len(extracted) == 1 else extracted,
@@ -675,7 +804,8 @@ def _save_quarantine(path: Path, rows: list[dict[str, Any]]) -> None:
 def _integrate_fuel_market(
     fuel_rows: list[dict[str, Any]], market_rows: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Attach the latest observed market values strictly before each fuel event date."""
+    """Deduplicate identical cross-source observations to one row per unique (product_id, effective_at_local)
+    event and attach the latest observed market values strictly before each fuel event date."""
     market_by_series: dict[str, list[dict[str, Any]]] = {}
     for row in market_rows:
         if row["observation_status"] == "observed" and row["value"] != "":
@@ -687,6 +817,23 @@ def _integrate_fuel_market(
             "dates": [row["observation_date"] for row in series_rows],
         }
 
+    # Group eligible fuel observations by unique (product_id, effective_at_local) event
+    event_groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in fuel_rows:
+        event_key = (row["product_id"], row["effective_at_local"])
+        event_groups.setdefault(event_key, []).append(row)
+
+    selected_fuel_events: list[dict[str, Any]] = []
+    for event_key, group in event_groups.items():
+        prices = {r["price_value"] for r in group}
+        if len(prices) > 1:
+            raise PipelineError(
+                f"conflicting cross-source prices in panel integration for event {event_key!r}: {sorted(prices)}"
+            )
+        # Prefer COMECO when identical valid observations exist from both providers
+        comeco_candidates = [r for r in group if r["source_id"] == "comeco"]
+        selected_fuel_events.append(comeco_candidates[0] if comeco_candidates else group[0])
+
     series_specs = {
         "brent_dated_usd_bbl": (
             "brent_observation_date", "brent_usd_per_barrel", "brent_age_days", "USD/bbl", "eia_fred"
@@ -697,7 +844,7 @@ def _integrate_fuel_market(
     }
     integrated: list[dict[str, Any]] = []
     missing_features = Counter()
-    for fuel in fuel_rows:
+    for fuel in selected_fuel_events:
         event_date = datetime.fromisoformat(fuel["effective_at_local"]).date()
         row: dict[str, Any] = {
             "product_id": fuel["product_id"],
@@ -738,6 +885,65 @@ def _integrate_fuel_market(
             row[f"{value_field}_unit"] = unit
         integrated.append(row)
     return integrated, dict(sorted(missing_features.items()))
+
+
+def _assess_event_fx_freshness(
+    panel_rows: list[dict[str, Any]],
+    fx_max_age_days: int,
+) -> dict[str, Any]:
+    """Evaluate FX freshness for every fuel event in the integrated panel.
+
+    Verifies that every attached FX observation is strictly prior to the fuel
+    event date (preventing look-ahead leakage), preserves ``fx_observation_date``,
+    ``fx_age_days``, ``fx_source_id``, and ``fx_snapshot_id``, and identifies
+    stale event-level FX observations where ``fx_age_days > fx_max_age_days``.
+    """
+    events_evaluated = 0
+    events_without_prior_fx = 0
+    fresh_events_count = 0
+    stale_events: list[dict[str, Any]] = []
+    max_event_fx_age_days: int | None = None
+
+    for row in panel_rows:
+        event_date = datetime.fromisoformat(row["effective_at_local"]).date()
+        obs_date_str = str(row.get("fx_observation_date") or "").strip()
+        if not obs_date_str:
+            events_without_prior_fx += 1
+            continue
+        obs_date = date.fromisoformat(obs_date_str)
+        age_days = int(row["fx_age_days"])
+        if obs_date >= event_date or age_days < 1:
+            raise PipelineError(
+                f"look-ahead FX observation detected for fuel event "
+                f"({row['product_id']!r}, {row['effective_at_local']!r}): "
+                f"fx_observation_date={obs_date_str!r}, fx_age_days={age_days}"
+            )
+        events_evaluated += 1
+        if max_event_fx_age_days is None or age_days > max_event_fx_age_days:
+            max_event_fx_age_days = age_days
+        if age_days > fx_max_age_days:
+            stale_events.append({
+                "product_id": row["product_id"],
+                "effective_at_local": row["effective_at_local"],
+                "fx_observation_date": obs_date_str,
+                "fx_age_days": age_days,
+                "fx_source_id": row["fx_source_id"],
+                "fx_snapshot_id": row["fx_snapshot_id"],
+            })
+        else:
+            fresh_events_count += 1
+
+    stale_events.sort(key=lambda item: (item["effective_at_local"], item["product_id"]))
+    return {
+        "max_age_days": fx_max_age_days,
+        "events_evaluated": events_evaluated,
+        "events_without_prior_fx": events_without_prior_fx,
+        "fresh_events_count": fresh_events_count,
+        "stale_events_count": len(stale_events),
+        "max_event_fx_age_days": max_event_fx_age_days,
+        "has_stale_events": bool(stale_events),
+        "stale_events": stale_events,
+    }
 
 
 def _validate_fx_config(collectors_config: Any) -> tuple[bool, int]:
@@ -794,7 +1000,11 @@ def run_pipeline(
         current_date = datetime.now(LOCAL_TZ).date()
     try:
         config = _load_config(config_path)
-        files = [raw_dir / BRENT_FILE, raw_dir / FX_FILE, raw_dir / FUEL_FILE]
+        brent_file = raw_dir / BRENT_FILE
+        fx_file = raw_dir / FX_FILE
+        pvoil_fuel_file = raw_dir / FUEL_FILE
+        comeco_fuel_file = raw_dir / COMECO_FUEL_FILE
+        files = [brent_file, fx_file, pvoil_fuel_file, comeco_fuel_file]
         if collectors_config_path is None:
             collectors_config_path = _repo_root() / "configs" / "collectors.yaml"
         elif not collectors_config_path.is_file():
@@ -804,10 +1014,12 @@ def run_pipeline(
             with collectors_config_path.open(encoding="utf-8") as stream:
                 collectors_config = yaml.safe_load(stream) or {}
         fx_optional, fx_max_age_days = _validate_fx_config(collectors_config)
-        required_files = [files[0], files[2]]
+        required_files = [brent_file]
         if not fx_optional:
-            required_files.append(files[1])
+            required_files.append(fx_file)
         missing_files = [path.name for path in required_files if not path.is_file()]
+        if not pvoil_fuel_file.is_file() and not comeco_fuel_file.is_file():
+            missing_files.append(FUEL_FILE)
         if missing_files:
             raise PipelineError(f"missing required raw source files: {missing_files}")
 
@@ -829,9 +1041,9 @@ def run_pipeline(
         logger.info("run_id=%s start schema=%s", run_id, SCHEMA_VERSION)
 
         brent, brent_q, brent_quality = _parse_market(
-            files[0], "eia_fred", "brent_dated_usd_bbl", "price_usd_per_barrel",
+            brent_file, "eia_fred", "brent_dated_usd_bbl", "price_usd_per_barrel",
             "unit", "USD/bbl", "Dollars per Barrel", "observation_status",
-            file_hashes[files[0].name], EXPECTED_HEADERS[BRENT_FILE],
+            file_hashes[brent_file.name], EXPECTED_HEADERS[BRENT_FILE],
         )
         fx: list[dict[str, Any]] = []
         fx_q: list[dict[str, Any]] = []
@@ -839,11 +1051,11 @@ def run_pipeline(
         fx_age_days: int | None = None
         fx_latest_date: date | None = None
         fx_condition: str = "missing"
-        if files[1].is_file():
+        if fx_file.is_file():
             fx, fx_q, fx_quality = _parse_market(
-                files[1], "algolab_sbv_central_rate", "usd_vnd_sbv_reference",
+                fx_file, "algolab_sbv_central_rate", "usd_vnd_sbv_reference",
                 "rate_vnd_per_usd", "unit", "VND/USD", "VND per 1 USD", None,
-                file_hashes[files[1].name], EXPECTED_HEADERS[FX_FILE],
+                file_hashes[fx_file.name], EXPECTED_HEADERS[FX_FILE],
             )
             if not fx:
                 if fx_quality["rows_read"] == 0:
@@ -906,9 +1118,93 @@ def run_pipeline(
                 "quarantined_rows": 0,
             }
 
-        fuel, fuel_q, fuel_quality = _parse_fuel(
-            files[2], file_hashes[files[2].name], EXPECTED_HEADERS[FUEL_FILE]
-        )
+        fuel_files_present = [f for f in (pvoil_fuel_file, comeco_fuel_file) if f.is_file()]
+        fuel_all: list[dict[str, Any]] = []
+        fuel_q_all: list[dict[str, Any]] = []
+        fuel_qualities: list[dict[str, Any]] = []
+        fuel_manifest_specs: list[tuple[Path, str, str, str]] = []
+
+        for f_path in fuel_files_present:
+            f_rows, f_quarantine, f_qual = _parse_fuel(
+                f_path, file_hashes[f_path.name], EXPECTED_HEADERS[f_path.name]
+            )
+            row_sources = {r["source_id"] for r in f_rows}
+            for q_item in f_quarantine:
+                q_raw = json.loads(q_item["raw_row_json"])
+                q_url = str(q_raw.get("source_url", "")).lower()
+                if "comeco.vn" in q_url:
+                    row_sources.add("comeco")
+                elif "pvoil" in q_url:
+                    row_sources.add("pvoil")
+            if len(row_sources) > 1:
+                raise PipelineError(
+                    f"{f_path.name}: mixed domestic fuel sources {sorted(row_sources)} in a single raw file; "
+                    f"segregate PVOIL into {FUEL_FILE!r} and COMECO into {COMECO_FUEL_FILE!r} to preserve snapshot provenance"
+                )
+            if f_path.name == COMECO_FUEL_FILE:
+                if row_sources and row_sources != {"comeco"}:
+                    raise PipelineError(
+                        f"{f_path.name}: expected 'comeco' observations, got {sorted(row_sources)}"
+                    )
+                file_source_id, file_publisher = "comeco", "COMECO"
+            else:
+                if row_sources == {"comeco"}:
+                    file_source_id, file_publisher = "comeco", "COMECO"
+                else:
+                    file_source_id, file_publisher = "pvoil", "PVOIL"
+
+            fuel_all.extend(f_rows)
+            fuel_q_all.extend(f_quarantine)
+            fuel_qualities.append(f_qual)
+            fuel_manifest_specs.append(
+                (f_path, file_source_id, file_publisher, f_qual["schema_fingerprint_sha256"])
+            )
+
+        if len(fuel_files_present) == 1:
+            fuel = fuel_all
+            fuel_q = fuel_q_all
+            fuel_quality = fuel_qualities[0]
+        else:
+            fuel, cross_q, cross_dups, cross_conflicts = _reconcile_cross_source_fuel(
+                fuel_all, COMECO_FUEL_FILE
+            )
+            fuel_q = fuel_q_all + cross_q
+            fuel_quality = {
+                "source_file": ", ".join(f.name for f in fuel_files_present),
+                "source_files": [f.name for f in fuel_files_present],
+                "rows_read": sum(q["rows_read"] for q in fuel_qualities),
+                "rows_canonical": len(fuel),
+                "exact_duplicates_collapsed": sum(
+                    q["exact_duplicates_collapsed"] for q in fuel_qualities
+                ),
+                "cross_source_duplicates_collapsed": (
+                    sum(q["cross_source_duplicates_collapsed"] for q in fuel_qualities) + cross_dups
+                ),
+                "cross_source_price_conflicts": (
+                    sum(q["cross_source_price_conflicts"] for q in fuel_qualities) + cross_conflicts
+                ),
+                "missing_values": sum(q["missing_values"] for q in fuel_qualities),
+                "quarantined_rows": len(fuel_q),
+                "zero_prices_quarantined": sum(q["zero_prices_quarantined"] for q in fuel_qualities),
+                "missing_price_change_values": sum(q["missing_price_change_values"] for q in fuel_qualities),
+                "effective_24_00_source_rows": sum(q["effective_24_00_source_rows"] for q in fuel_qualities),
+                "effective_24_00_normalized": sum(q["effective_24_00_normalized"] for q in fuel_qualities),
+                "products": {
+                    pid: {
+                        "source_rows": sum(
+                            q["products"].get(pid, {}).get("source_rows", 0) for q in fuel_qualities
+                        ),
+                        "canonical_rows": sum(row["product_id"] == pid for row in fuel),
+                        "quarantined_rows": (
+                            sum(q["products"].get(pid, {}).get("quarantined_rows", 0) for q in fuel_qualities)
+                            + sum(json.loads(qr["raw_row_json"]).get("product_id") == pid for qr in cross_q)
+                        ),
+                    }
+                    for pid in sorted({p for q in fuel_qualities for p in q["products"]})
+                },
+                "schema_fingerprint_sha256": fuel_qualities[0]["schema_fingerprint_sha256"],
+            }
+
         fund_annotations_applied = _apply_fund_annotations(fuel, annotation_path)
 
         market_input = brent + ([] if fx_is_stale else fx)
@@ -924,14 +1220,18 @@ def run_pipeline(
         )
         panel_rows, missing_prior_market = _integrate_fuel_market(fuel, market_rows)
         _validate_integrated_outputs(fuel, market_rows, panel_rows, not fx_optional)
+        event_fx_freshness = _assess_event_fx_freshness(panel_rows, fx_max_age_days)
+        fx_quality["event_freshness"] = event_fx_freshness
+        fx_quality["stale_fx_events_count"] = event_fx_freshness["stale_events_count"]
+        fx_quality["max_event_fx_age_days"] = event_fx_freshness["max_event_fx_age_days"]
         all_quarantine = brent_q + fx_q + fuel_q
 
         # Load source row counts and schema fingerprints for a complete provenance manifest.
         manifests = []
-        manifest_specs = [(files[0], "eia_fred", "EIA, distributed by FRED", brent_quality["schema_fingerprint_sha256"])]
-        if files[1].is_file():
-            manifest_specs.append((files[1], "algolab_sbv_central_rate", "Algolab provider declaration; upstream SBV", fx_quality["schema_fingerprint_sha256"]))
-        manifest_specs.append((files[2], "pvoil", "PVOIL", fuel_quality["schema_fingerprint_sha256"]))
+        manifest_specs = [(brent_file, "eia_fred", "EIA, distributed by FRED", brent_quality["schema_fingerprint_sha256"])]
+        if fx_file.is_file():
+            manifest_specs.append((fx_file, "algolab_sbv_central_rate", "Algolab provider declaration; upstream SBV", fx_quality["schema_fingerprint_sha256"]))
+        manifest_specs.extend(fuel_manifest_specs)
         for path, source_id, publisher, fingerprint in manifest_specs:
             manifests.append(_manifest_entry(path, source_id, publisher, fingerprint))
         if annotation_path.is_file():
@@ -970,6 +1270,7 @@ def run_pipeline(
                 "fuel_market_panel_rows": len(panel_rows),
                 "stabilization_fund_annotations_applied": fund_annotations_applied,
                 "fuel_events_without_prior_market_observation": missing_prior_market,
+                "fx_event_freshness": event_fx_freshness,
                 "exact_duplicate_keys_collapsed": (
                     brent_quality["exact_duplicates_collapsed"]
                     + fx_quality["exact_duplicates_collapsed"]

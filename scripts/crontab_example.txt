@@ -68,13 +68,13 @@ CRON_TZ=Asia/Ho_Chi_Minh
 30 9 * * 1-5 set -a && . /etc/petrotwin/env && set +a && mkdir -p /home/petrotwin/PetroTwin-/logs/locks && cd /home/petrotwin/PetroTwin- && /home/petrotwin/.venv/bin/python -m petrotwin.collectors.fx >> /home/petrotwin/PetroTwin-/logs/fx.log 2>&1
 
 # =========================================================================
-# JOB 3 — Domestic Fuel Price Polling (PVOIL)
+# JOB 3 — Domestic Fuel Price Polling (COMECO)
 #   Thursdays, every 5 minutes from 15:05 to 15:30 Asia/Ho_Chi_Minh (= 08:05–08:30 UTC Thu).
-#   MOIT/PVOIL release retail fuel adjustment notices on Thursdays at ~15:00 ICT.
+#   MOIT/COMECO release retail fuel adjustment notices on Thursdays at ~15:00 ICT.
 #   The collector is idempotent: stops appending once the new adjustment date exists.
-#   Cross-process lock: logs/locks/domestic_fuel.lock.
+#   Cross-process lock: logs/locks/comeco.lock.
 # =========================================================================
-5-30/5 15 * * 4 set -a && . /etc/petrotwin/env && set +a && mkdir -p /home/petrotwin/PetroTwin-/logs/locks && cd /home/petrotwin/PetroTwin- && /home/petrotwin/.venv/bin/python -m petrotwin.collectors.domestic_fuel >> /home/petrotwin/PetroTwin-/logs/domestic_fuel.log 2>&1
+5-30/5 15 * * 4 set -a && . /etc/petrotwin/env && set +a && mkdir -p /home/petrotwin/PetroTwin-/logs/locks && cd /home/petrotwin/PetroTwin- && /home/petrotwin/.venv/bin/python -m petrotwin.collectors.comeco >> /home/petrotwin/PetroTwin-/logs/comeco.log 2>&1
 
 # =========================================================================
 # JOB 4a — Pipeline & Loader (Non-Thursday: Sun, Mon, Tue, Wed, Fri, Sat)
@@ -88,7 +88,7 @@ CRON_TZ=Asia/Ho_Chi_Minh
 # =========================================================================
 # JOB 4b — Pipeline & Loader (Thursday adjustment day)
 #   Thursdays at 16:35 Asia/Ho_Chi_Minh (= 09:35 UTC Thu).
-#   Runs safely after the 15:00–15:30 PVOIL polling window completes.
+#   Runs safely after the 15:00–15:30 COMECO polling window completes.
 #   Integrates fuel price notice into master dataset and pushes to MySQL.
 #   Cross-process locks: logs/locks/runner.lock and logs/locks/pipeline.lock.
 # =========================================================================
