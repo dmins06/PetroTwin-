@@ -219,17 +219,3 @@ For BOG estimation, explain which observed features influenced the estimated pro
 7. BOG annotations are incomplete. The current binary field represents confirmed spending versus confirmed no spending; it does not encode a three-way `NO_ACTION / SPEND / CONTRIBUTE` classification.
 8. A numerical no-BOG/BOG price scenario requires a verified policy formula or a defensible separately evaluated model. The current data contract alone does not establish that formula.
 9. Product eligibility, minimum training history, validation fold sizes, and the final feature list must be confirmed from the current snapshot before model training.
-
-## 13. Acceptance checklist for T20
-
-- [ ] Primary target field, unit, and product-specific scope are explicit.
-- [ ] Event-based grain and next-adjustment horizon are explicit.
-- [ ] Forecast origin and point-in-time information cutoff are explicit.
-- [ ] New-input refresh is distinguished from model retraining.
-- [ ] Feature families and leakage exclusions are documented.
-- [ ] Baseline is defined before evaluation.
-- [ ] Chronological validation and fold-local preprocessing are required.
-- [ ] Metrics and forecast-to-actual matching rules are explicit.
-- [ ] BOG verified/unverified label semantics and scenario limitations are documented.
-- [ ] Immutable forecast-vintage and monitoring requirements are documented.
-- [ ] Team confirms unresolved product scope and BOG scenario method before implementation.
