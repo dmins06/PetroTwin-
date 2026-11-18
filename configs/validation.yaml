@@ -1,0 +1,207 @@
+# PetroTwin M3 T21 - Time Series Validation & Leakage-Prevention Configuration
+# Grounded in canonical dataset snapshot on branch feature/m3-t21-validation-strategy (2026-11-18).
+# All cutoffs and counts reflect actual repository CSVs; incomplete/unverified BOG scopes are marked provisional.
+
+schema_version: petrotwin-validation-v1
+timezone: Asia/Ho_Chi_Minh
+
+data_snapshot_anchor:
+  fuel_effective_start: "2018-08-22"
+  fuel_effective_end: "2026-11-12"
+  distinct_adjustment_events: 313
+  canonical_valid_observations: 1402
+  quarantined_zero_price_rows: 64
+  brent_range: ["2018-08-22", "2026-11-11"]
+  brent_rows: 2146
+  fx_range: ["2018-08-22", "2026-11-18"]
+  fx_rows: 2419
+  bog_annotations_range: ["2019-01-16", "2026-10-22"]
+  bog_annotation_rows: 565
+  bog_distinct_dates: 125
+
+split_strategy:
+  chronological_only: true
+  random_shuffle: false
+  group_by_event_key: effective_at_local
+  allow_event_split_across_partitions: false
+  primary_validation_method: expanding_window
+  supplementary_validation_method: rolling_window
+  partitions:
+    initial_train:
+      start_date: "2018-08-22"
+      end_date: "2023-12-31"
+      actual_event_range: ["2018-08-22", "2023-12-28"]
+      events: 153
+      observations: 632
+    validation:
+      start_date: "2024-01-01"
+      end_date: "2025-12-31"
+      actual_event_range: ["2024-01-04", "2025-12-31"]
+      events: 106
+      observations: 516
+      num_folds: 4
+    final_test:
+      start_date: "2026-01-01"
+      end_date: "2026-11-12"
+      actual_event_range: ["2026-01-08", "2026-11-12"]
+      events: 54
+      observations: 254
+      locked: true
+
+expanding_window:
+  description: "Primary validation strategy; training history grows cumulatively across 6-month validation folds."
+  folds:
+    - fold_id: expanding_fold_1
+      train_start: "2018-08-22"
+      train_end: "2023-12-31"
+      train_events: 153
+      train_observations: 632
+      val_start: "2024-01-01"
+      val_end: "2024-06-30"
+      val_events: 26
+      val_observations: 105
+    - fold_id: expanding_fold_2
+      train_start: "2018-08-22"
+      train_end: "2024-06-30"
+      train_events: 179
+      train_observations: 737
+      val_start: "2024-07-01"
+      val_end: "2024-12-31"
+      val_events: 26
+      val_observations: 118
+    - fold_id: expanding_fold_3
+      train_start: "2018-08-22"
+      train_end: "2024-12-31"
+      train_events: 205
+      train_observations: 855
+      val_start: "2025-01-01"
+      val_end: "2025-06-30"
+      val_events: 26
+      val_observations: 130
+    - fold_id: expanding_fold_4
+      train_start: "2018-08-22"
+      train_end: "2025-06-30"
+      train_events: 231
+      train_observations: 985
+      val_start: "2025-07-01"
+      val_end: "2025-12-31"
+      val_events: 28
+      val_observations: 163
+
+rolling_window:
+  description: "Supplementary stability check using a fixed 730-day (24-month) lookback window on identical validation folds."
+  lookback_days: 730
+  folds:
+    - fold_id: rolling_fold_1
+      train_cutoff_start: "2022-01-01"
+      train_actual_range: ["2022-01-11", "2023-12-28"]
+      train_events: 71
+      train_observations: 284
+      val_start: "2024-01-01"
+      val_end: "2024-06-30"
+      val_events: 26
+      val_observations: 105
+    - fold_id: rolling_fold_2
+      train_cutoff_start: "2022-07-02"
+      train_actual_range: ["2022-07-11", "2024-06-27"]
+      train_events: 80
+      train_observations: 321
+      val_start: "2024-07-01"
+      val_end: "2024-12-31"
+      val_events: 26
+      val_observations: 118
+    - fold_id: rolling_fold_3
+      train_cutoff_start: "2023-01-02"
+      train_actual_range: ["2023-01-03", "2024-12-26"]
+      train_events: 88
+      train_observations: 367
+      val_start: "2025-01-01"
+      val_end: "2025-06-30"
+      val_events: 26
+      val_observations: 130
+    - fold_id: rolling_fold_4
+      train_cutoff_start: "2023-07-02"
+      train_actual_range: ["2023-07-03", "2025-06-26"]
+      train_events: 97
+      train_observations: 429
+      val_start: "2025-07-01"
+      val_end: "2025-12-31"
+      val_events: 28
+      val_observations: 163
+
+forecast_origin_and_leakage:
+  definitions:
+    observation_date: "Calendar date of market input (Brent/FX) or fuel record observation."
+    effective_date: "Official domestic retail price effective timestamp (effective_at_local, Asia/Ho_Chi_Minh)."
+    forecast_origin: "Timestamp t0 at which a forecast for the next adjustment cycle is generated; only data with available_at <= t0 is eligible."
+  rules:
+    strict_prior_day_market_join: true
+    market_join_condition: "market.observation_date < forecast_origin_date AND market.available_at <= forecast_origin"
+    fuel_history_condition: "fuel.effective_at_local <= forecast_origin_local"
+    brent_late_data_policy: "Exclude any Brent observation arriving or revised after forecast_origin; never backfill future revisions into historical backtest origins."
+    fx_publication_delay_policy: "Enforce publication timestamp <= forecast_origin; respect configs/collectors.yaml (fx.optional=true, max_age_days=7) using forward-fill from last known value at <= t0 only."
+    lag_and_rolling_policy: "Compute lags and rolling windows strictly backward from <= forecast_origin; never use centered windows or full-series statistics."
+    preprocessing_fit_policy: "Fit scalers, encoders, and imputers strictly on each fold's training split and transform validation/test splits without refitting."
+    within_cycle_tracking: "Multiple forecast_origins between two official adjustment events share the same target event and must all be evaluated against that event's official price without leaking post-origin updates."
+
+tuning_and_comparison:
+  models:
+    - naive_persistence_baseline
+    - sarimax
+    - xgboost
+  require_identical_folds: true
+  require_identical_forecast_origins: true
+  require_comparable_observation_set: true
+  primary_selection_metric: mae
+  secondary_metrics:
+    - rmse
+    - mape
+    - directional_accuracy
+  hyperparameter_tuning_scope: validation_folds_only
+  comparison_aggregation:
+    report_per_fold: true
+    report_mean_and_std_across_folds: true
+    report_pooled_validation_metrics: true
+    report_per_product_breakdown: true
+
+final_test_policy:
+  locked: true
+  single_evaluation_only: true
+  prohibit_tuning_on_test: true
+  retrain_scope_before_test: "2018-08-22 .. 2025-12-31 (259 events, 1148 observations)"
+  test_scope: "2026-01-01 .. 2026-11-12 (54 events, 254 observations)"
+  report_validation_and_test_separately: true
+
+bog_evaluation:
+  provisional: true
+  provisional_reason: "stabilization_fund_annotations.csv covers 2019-01-16..2026-10-22 with 0 CONTRIBUTE labels and 0 SPEND labels in 2024-2025 validation folds."
+  classes:
+    0: NO_ACTION
+    1: SPEND
+    2: CONTRIBUTE
+  missing_or_unverified_policy: preserve_null
+  never_coerce_null_to_no_action: true
+  metrics:
+    - accuracy
+    - precision_macro
+    - recall_macro
+    - f1_macro
+    - confusion_matrix
+  calibration_metrics:
+    - brier_score
+    - log_loss
+  edge_case_policies:
+    zero_valid_labels_in_fold: "Mark fold status=not_evaluable (e.g. expanding_fold_1 has 0 valid BOG labels), retain in manifest, exclude from BOG metric aggregation."
+    missing_class_in_fold: "Keep all 3 classes in confusion matrix, report support=0 and undefined precision/recall/F1 for missing classes, mark 3-class f1_macro as undefined_single_class when <2 classes appear."
+    unobserved_contribute_class: "Keep class 2 (CONTRIBUTE) in schema and confusion matrix with support=0; mark class-2 evaluation provisional until verified CONTRIBUTE annotations exist."
+  validation_fold_bog_counts:
+    initial_train: {no_action: 74, spend: 111, contribute: 0, null_unverified: 447}
+    expanding_fold_1: {no_action: 0, spend: 0, contribute: 0, null_unverified: 105}
+    expanding_fold_2: {no_action: 5, spend: 0, contribute: 0, null_unverified: 113}
+    expanding_fold_3: {no_action: 130, spend: 0, contribute: 0, null_unverified: 0}
+    expanding_fold_4: {no_action: 140, spend: 0, contribute: 0, null_unverified: 23}
+    final_test: {no_action: 86, spend: 19, contribute: 0, null_unverified: 149}
+  supplementary_historical_bog_check:
+    provisional: true
+    description: "Optional pre-2024 historical expanding check within initial_train (e.g., 2021..2023) to verify SPEND recall without touching 2026 final_test."
+    eligible_window: ["2019-01-16", "2023-12-31"]
