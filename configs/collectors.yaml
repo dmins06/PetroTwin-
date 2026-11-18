@@ -23,14 +23,16 @@ fx:
   retry_count: 3
   retry_delay_seconds: 5
 
-domestic_fuel:
-  source_id: pvoil
-  source_url: https://pvoil.com.vn/tin-gia-xang-dau
+comeco:
+  source_id: comeco
+  source_name: COMECO
+  source_url: https://comeco.vn/
   license_reuse_terms: "unknown; verify with publisher"
   request_timeout_seconds: 30
+  runner_timeout_seconds: 60
   retry_count: 2
-  retry_delay_seconds: 10
-  default_effective_time: "15:00"
+  retry_delay_seconds: 5
+  max_age_days: 7
 
 runner:
   log_dir: logs

@@ -15,6 +15,7 @@ Environment variables:
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import logging
@@ -46,6 +47,9 @@ PROVENANCE_STATUS = "provider_declared"
 ALGOLAB_URL = "https://algolab.vn/macro/vn-fx-rate-ty-gia-sbv-trung-tam"
 # Backward-compatible name for callers using the previously misspelled constant.
 ALGOAB_URL = ALGOLAB_URL
+ALGOLAB_TV_SYMBOLS_URL = "https://algolab.vn/api/tv/symbols"
+ALGOLAB_TV_HISTORY_URL = "https://algolab.vn/api/tv/history"
+ALGOLAB_TV_SYMBOL = "VN_FX_RATE_TY_GIA_SBV_TRUNG_TAM"
 
 UNIT = "VND per 1 USD"
 RATE_TYPE = "SBV central reference rate"
@@ -227,50 +231,167 @@ def _parse_algolab_html(html: str) -> tuple[int, date]:
 
     soup = BeautifulSoup(html, "html.parser")
     visible_text = " ".join(soup.stripped_strings)
-    if re.search(r"T[ỷy] giá SBV trung tâm|T[ỷy] giá USD[^\n]*SBV trung tâm", visible_text, re.IGNORECASE) is None:
-        raise FXSourceSchemaError("Algolab HTML structure changed: central-rate page heading not found")
-    if re.search(r"Nguồn\s*:\s*(?:GSO\s*/\s*)?SBV", visible_text, re.IGNORECASE) is None:
-        raise FXSourceSchemaError("Algolab HTML structure changed: SBV source declaration not found")
 
-    # Locate the latest central-rate card/section by searching for the "Mới nhất" or "Latest" label.
-    card_match = re.search(r"(?:Mới nhất|Latest)\b", visible_text, re.IGNORECASE)
-    if card_match is None:
-        raise FXSourceSchemaError("Algolab HTML changed: latest central-rate card not found")
+    heading_pattern = (
+        r"T[ỷy] giá SBV trung tâm|"
+        r"T[ỷy] giá USD[^\n]*SBV trung tâm"
+    )
+    if re.search(heading_pattern, visible_text, re.IGNORECASE) is None:
+        raise FXSourceSchemaError(
+            "Algolab HTML structure changed: central-rate page heading not found"
+        )
 
-    # Scope extraction to a window around the label to prevent matching unrelated numbers elsewhere.
-    start_pos = card_match.start()
-    window = visible_text[max(0, start_pos - 60) : start_pos + 350]
+    # Prefer the current Algolab JSON-LD Dataset metadata.
+    dataset = None
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            payload = json.loads(script.string or script.get_text())
+        except (TypeError, ValueError):
+            continue
 
-    # USD/VND central rate is a 5-digit rate (10,000–99,999 VND/USD, e.g. 25,627 or 25627).
-    # Explicit 5-digit pattern prevents accidentally matching timestamps (09:00), index ranks (#1),
-    # price change deltas (+15, -5), percentage changes (+0.06%), or 4-digit years (2026).
-    rate_match = re.search(r"\b([1-9]\d[.,]\d{3}|[1-9]\d{4})(?:[.,]0+)?\b", window)
-    if rate_match is None:
-        raise FXSourceSchemaError("Algolab central-rate card contains invalid date or rate")
+        candidates = payload if isinstance(payload, list) else [payload]
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            if candidate.get("@type") == "Dataset":
+                dataset = candidate
+                break
+        if dataset is not None:
+            break
 
-    date_match = re.search(r"\b([0-3]?\d[/-][0-1]?\d[/-][12]\d{3}|[12]\d{3}-[0-1]\d-[0-3]\d)\b", window)
-    if date_match is None:
-        raise FXSourceSchemaError("Algolab central-rate card contains invalid date or rate")
+    if dataset is not None:
+        measured = dataset.get("variableMeasured")
+        based_on = dataset.get("isBasedOn")
+        description = str(dataset.get("description", ""))
 
-    raw_rate = rate_match.group(1)
-    raw_date = date_match.group(1)
-    try:
-        if "/" in raw_date:
-            observation_date = datetime.strptime(raw_date, "%d/%m/%Y").date()
-        elif "-" in raw_date and len(raw_date.split("-")[0]) == 4:
-            observation_date = date.fromisoformat(raw_date)
-        else:
-            observation_date = datetime.strptime(raw_date, "%d-%m-%Y").date()
-        rate_decimal = float(raw_rate.replace(".", "").replace(",", ""))
-    except (TypeError, ValueError) as exc:
-        raise FXSourceSchemaError("Algolab central-rate card contains invalid date or rate") from exc
-    if not rate_decimal.is_integer() or rate_decimal <= 0:
-        raise FXSourceSchemaError("Algolab central rate must be a positive integer")
-    if not 1_000 <= rate_decimal <= 100_000:
+        if not isinstance(measured, dict):
+            raise FXSourceSchemaError("Algolab Dataset variableMeasured is invalid")
+        if not isinstance(based_on, dict):
+            raise FXSourceSchemaError("Algolab Dataset isBasedOn is invalid")
+
+        if not re.search(
+            r"T[ỷy] giá USD:\s*T[ỷy] giá SBV trung tâm",
+            str(dataset.get("name", "")),
+            re.IGNORECASE,
+        ):
+            raise FXSourceSchemaError("Algolab Dataset name is not the SBV central rate")
+
+        if not re.search(
+            r"T[ỷy] giá SBV trung tâm",
+            str(measured.get("name", "")),
+            re.IGNORECASE,
+        ):
+            raise FXSourceSchemaError("Algolab Dataset metric is not the SBV central rate")
+
+        if str(measured.get("unitText", "")).strip().upper() != "VND":
+            raise FXSourceSchemaError("Algolab Dataset unit must be VND")
+
+        source_name = str(based_on.get("name", "")).strip()
+        if re.fullmatch(r"GSO\s*/\s*SBV", source_name, re.IGNORECASE) is None:
+            raise FXSourceSchemaError("Algolab Dataset upstream source declaration is invalid")
+
+        source_in_description = re.search(
+            r"Nguồn\s*:\s*GSO\s*/\s*SBV",
+            description,
+            re.IGNORECASE,
+        )
+        if source_in_description is None:
+            raise FXSourceSchemaError("Algolab Dataset description has no GSO / SBV declaration")
+
+        date_modified = str(dataset.get("dateModified", "")).strip()
+        try:
+            metadata_date = date.fromisoformat(date_modified)
+        except ValueError as exc:
+            raise FXSourceSchemaError("Algolab Dataset dateModified is invalid") from exc
+
+        rate_match = re.search(
+            r"Mới nhất\s+([1-9]\d[.,]\d{3}|[1-9]\d{4})(?:[.,]0+)?\s*VND",
+            description,
+            re.IGNORECASE,
+        )
+        date_match = re.search(
+            r"\(([0-3]?\d/[0-1]?\d/[12]\d{3})\)",
+            description,
+        )
+        if rate_match is None or date_match is None:
+            raise FXSourceSchemaError("Algolab Dataset description has invalid rate or date")
+
+        try:
+            rate = int(rate_match.group(1).replace(",", "").replace(".", ""))
+            observation_date = datetime.strptime(
+                date_match.group(1), "%d/%m/%Y"
+            ).date()
+        except ValueError as exc:
+            raise FXSourceSchemaError("Algolab Dataset rate or date is invalid") from exc
+
+        if observation_date != metadata_date:
+            raise FXSourceSchemaError("Algolab Dataset date does not match description date")
+
+        # Confirm the Dataset values are also present in the rendered page.
+        normalized_text = re.sub(r"\s+", " ", visible_text)
+        display_rate = re.search(
+            rf"(?<!\d){rate:,}(?!\d)|(?<!\d){rate}(?!\d)",
+            normalized_text,
+        )
+        display_date = observation_date.strftime("%d/%m/%Y")
+        if display_rate is None or display_date not in normalized_text:
+            raise FXSourceSchemaError(
+                "Algolab Dataset values do not match the visible page"
+            )
+
+    else:
+        # Backward compatibility for the previous Algolab HTML structure.
+        if re.search(
+            r"Nguồn\s*:\s*(?:GSO\s*/\s*)?SBV",
+            visible_text,
+            re.IGNORECASE,
+        ) is None:
+            raise FXSourceSchemaError(
+                "Algolab HTML structure changed: SBV source declaration not found"
+            )
+
+        card_match = re.search(r"(?:Mới nhất|Latest)\b", visible_text, re.IGNORECASE)
+        if card_match is None:
+            raise FXSourceSchemaError(
+                "Algolab HTML changed: latest central-rate card not found"
+            )
+
+        window = visible_text[
+            max(0, card_match.start() - 60):card_match.start() + 350
+        ]
+        rate_match = re.search(
+            r"\b([1-9]\d[.,]\d{3}|[1-9]\d{4})(?:[.,]0+)?\b",
+            window,
+        )
+        date_match = re.search(
+            r"\b([0-3]?\d[/-][0-1]?\d[/-][12]\d{3}|[12]\d{3}-[0-1]\d-[0-3]\d)\b",
+            window,
+        )
+        if rate_match is None or date_match is None:
+            raise FXSourceSchemaError(
+                "Algolab central-rate card contains invalid date or rate"
+            )
+
+        raw_date = date_match.group(1)
+        try:
+            if "/" in raw_date:
+                observation_date = datetime.strptime(raw_date, "%d/%m/%Y").date()
+            elif len(raw_date.split("-")[0]) == 4:
+                observation_date = date.fromisoformat(raw_date)
+            else:
+                observation_date = datetime.strptime(raw_date, "%d-%m-%Y").date()
+            rate = int(rate_match.group(1).replace(".", "").replace(",", ""))
+        except ValueError as exc:
+            raise FXSourceSchemaError(
+                "Algolab central-rate card contains invalid date or rate"
+            ) from exc
+
+    if not 1_000 <= rate <= 100_000:
         raise FXSourceSchemaError("Algolab central rate is outside the expected USD/VND range")
     if observation_date > date.today():
         raise FXSourceSchemaError("Algolab central-rate observation date is in the future")
-    return int(rate_decimal), observation_date
+
+    return rate, observation_date
 
 
 def _fetch_rate() -> tuple[int, date]:
@@ -317,6 +438,195 @@ def _fetch_with_retries() -> tuple[int, date]:
     raise FXSourceUnavailableError("FX source fetch exhausted without a result")
 
 
+def _first_date_in_csv(path: Path) -> date | None:
+    if not path.exists():
+        return None
+    first: date | None = None
+    with path.open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            try:
+                d = date.fromisoformat(row["date"].strip())
+                if first is None or d < first:
+                    first = d
+            except (KeyError, ValueError):
+                continue
+    return first
+
+
+def _existing_dates_in_csv(path: Path) -> dict[date, int]:
+    """Return mapping of existing observation dates to their integer rate in *path*."""
+    if not path.exists():
+        return {}
+    existing: dict[date, int] = {}
+    with path.open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            try:
+                d = date.fromisoformat(row["date"].strip())
+                rate = int(float(row["rate_vnd_per_usd"].strip()))
+                existing[d] = rate
+            except (KeyError, ValueError):
+                continue
+    return existing
+
+
+def _validate_algolab_tv_symbol(payload: object) -> None:
+    """Validate that Algolab's UDF symbol metadata represents the SBV central reference rate."""
+    if not isinstance(payload, dict):
+        raise FXSourceSchemaError("Algolab UDF symbol metadata must be a JSON object")
+    if payload.get("name") != ALGOLAB_TV_SYMBOL or payload.get("ticker") != ALGOLAB_TV_SYMBOL:
+        raise FXSourceSchemaError(f"Unexpected Algolab UDF symbol: {payload.get('name')!r}")
+    if payload.get("type") != "economy":
+        raise FXSourceSchemaError("Algolab UDF symbol type must be 'economy'")
+    description = str(payload.get("description", ""))
+    if not re.search(r"T[ỷy] giá USD:\s*T[ỷy] giá SBV trung tâm\s*\(VND\)", description, re.IGNORECASE):
+        raise FXSourceSchemaError("Algolab UDF symbol description does not match SBV central rate (VND)")
+
+
+def _parse_algolab_tv_history(
+    payload: object,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    include_saturdays: bool = False,
+) -> list[tuple[date, int]]:
+    """Parse Algolab UDF daily history payload into sorted (observation_date, rate) pairs."""
+    if not isinstance(payload, dict):
+        raise FXSourceSchemaError("Algolab UDF history response must be a JSON object")
+    status = payload.get("s")
+    if status == "no_data":
+        return []
+    if status != "ok":
+        raise FXSourceSchemaError(f"Algolab UDF history returned invalid status: {status!r}")
+    times = payload.get("t")
+    closes = payload.get("c")
+    if not isinstance(times, list) or not isinstance(closes, list) or len(times) != len(closes):
+        raise FXSourceSchemaError("Algolab UDF history 't' and 'c' arrays are missing or mismatched")
+
+    today = date.today()
+    by_date: dict[date, int] = {}
+    for ts_raw, close_raw in zip(times, closes):
+        if isinstance(ts_raw, bool) or not isinstance(ts_raw, (int, float)):
+            raise FXSourceSchemaError("Algolab UDF history timestamp must be numeric")
+        if isinstance(close_raw, bool) or not isinstance(close_raw, (int, float)):
+            raise FXSourceSchemaError("Algolab UDF history close value must be numeric")
+        obs_date = datetime.fromtimestamp(int(ts_raw), tz=timezone.utc).date()
+        if obs_date > today:
+            raise FXSourceSchemaError(f"Algolab UDF history contains future date: {obs_date.isoformat()}")
+        rate_float = float(close_raw)
+        if not rate_float.is_integer():
+            raise FXSourceSchemaError(f"Algolab UDF history rate is not an integer: {close_raw!r}")
+        rate = int(rate_float)
+        if not 1_000 <= rate <= 100_000:
+            raise FXSourceSchemaError(f"Algolab UDF history rate outside valid USD/VND range: {rate}")
+        if start_date is not None and obs_date < start_date:
+            continue
+        if end_date is not None and obs_date > end_date:
+            continue
+        max_weekday = 5 if include_saturdays else 4
+        if obs_date.weekday() > max_weekday:
+            continue
+        if obs_date in by_date and by_date[obs_date] != rate:
+            raise FXSourceSchemaError(
+                f"Conflicting Algolab UDF history values for {obs_date.isoformat()}: {by_date[obs_date]} vs {rate}"
+            )
+        by_date[obs_date] = rate
+
+    return sorted(by_date.items(), key=lambda item: item[0])
+
+
+def _fetch_history_range(
+    start_date: date,
+    end_date: date,
+    include_saturdays: bool = False,
+) -> list[tuple[date, int]]:
+    settings = _fx_config()
+    if settings.get("source_status") not in {"enabled", "verified"}:
+        raise FXSourceUnavailableError(
+            "Algolab central-rate source is not verified in configuration; "
+            "commercial-bank rates will not be used"
+        )
+    if settings.get("source_id") != SOURCE_ID:
+        raise FXSourceUnavailableError("FX source_id must be algolab_sbv_central_rate")
+    source_url = str(settings.get("source_url", "")).strip()
+    if source_url != ALGOAB_URL:
+        raise FXSourceUnavailableError("Unexpected Algolab FX source_url")
+
+    timeout = _request_timeout()
+    headers = {
+        "Accept": "application/json",
+        "Referer": source_url,
+        "User-Agent": "PetroTwin-data-collector/1.0",
+    }
+    _log(
+        "history_fetch_start",
+        symbol=ALGOLAB_TV_SYMBOL,
+        start_date=start_date.isoformat(),
+        end_date=end_date.isoformat(),
+    )
+    sym_resp = requests.get(
+        ALGOLAB_TV_SYMBOLS_URL,
+        params={"symbol": ALGOLAB_TV_SYMBOL},
+        headers=headers,
+        timeout=timeout,
+    )
+    sym_resp.raise_for_status()
+    try:
+        sym_payload = sym_resp.json()
+    except ValueError as exc:
+        raise FXSourceSchemaError("Algolab UDF symbol response is not valid JSON") from exc
+    _validate_algolab_tv_symbol(sym_payload)
+
+    from_ts = int(datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc).timestamp())
+    to_dt = end_date + timedelta(days=1)
+    to_ts = int(datetime(to_dt.year, to_dt.month, to_dt.day, tzinfo=timezone.utc).timestamp())
+
+    hist_resp = requests.get(
+        ALGOLAB_TV_HISTORY_URL,
+        params={
+            "symbol": ALGOLAB_TV_SYMBOL,
+            "resolution": "D",
+            "from": str(from_ts),
+            "to": str(to_ts),
+        },
+        headers=headers,
+        timeout=timeout,
+    )
+    hist_resp.raise_for_status()
+    try:
+        hist_payload = hist_resp.json()
+    except ValueError as exc:
+        raise FXSourceSchemaError("Algolab UDF history response is not valid JSON") from exc
+
+    pairs = _parse_algolab_tv_history(
+        hist_payload,
+        start_date=start_date,
+        end_date=end_date,
+        include_saturdays=include_saturdays,
+    )
+    _log("history_fetch_done", count=len(pairs), provider=SOURCE_NAME)
+    return pairs
+
+
+def _fetch_history_with_retries(
+    start_date: date,
+    end_date: date,
+    include_saturdays: bool = False,
+) -> list[tuple[date, int]]:
+    retry_count, retry_delay = _retry_settings()
+    for attempt in range(retry_count + 1):
+        try:
+            return _fetch_history_range(start_date, end_date, include_saturdays=include_saturdays)
+        except (FXSourceUnavailableError, FXSourceSchemaError):
+            raise
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            if attempt >= retry_count:
+                raise
+            _log("fetch_retryable_error", attempt=attempt + 1, error=str(exc))
+            time.sleep(retry_delay)
+    raise FXSourceUnavailableError("FX history fetch exhausted without a result")
+
+
 # ---------------------------------------------------------------------------
 # CSV write
 # ---------------------------------------------------------------------------
@@ -349,15 +659,231 @@ def _append_to_csv(path: Path, rows: Sequence[dict[str, str]]) -> None:
         raise
 
 
+def _insert_rows_chronologically(path: Path, rows: Sequence[dict[str, str]]) -> int:
+    """Atomically insert *rows* for missing dates into *path* in chronological order.
+
+    Existing observations are preserved verbatim and never overwritten.
+    Raises FXSourceSchemaError if any new row conflicts with an existing row
+    or with another new row for the same date.
+    """
+    existing_map = _existing_dates_in_csv(path)
+    to_insert: list[dict[str, str]] = []
+    seen_new: dict[date, int] = {}
+    for row in rows:
+        d = date.fromisoformat(row["date"].strip())
+        rate = int(float(row["rate_vnd_per_usd"].strip()))
+        if d in existing_map:
+            if existing_map[d] != rate:
+                raise FXSourceSchemaError(
+                    f"Existing FX rate for {d.isoformat()} ({existing_map[d]}) "
+                    f"differs from new rate ({rate}); refusing to overwrite"
+                )
+            continue
+        if d in seen_new:
+            if seen_new[d] != rate:
+                raise FXSourceSchemaError(
+                    f"Conflicting duplicate FX rows for {d.isoformat()}: "
+                    f"{seen_new[d]} vs {rate}"
+                )
+            continue
+        seen_new[d] = rate
+        to_insert.append(row)
+
+    if not to_insert:
+        return 0
+
+    existing_rows: list[dict[str, str]] = []
+    fieldnames = list(COLUMNS)
+    if path.exists():
+        with path.open(newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            if reader.fieldnames:
+                fieldnames = list(reader.fieldnames)
+            existing_rows = list(reader)
+
+    merged = existing_rows + to_insert
+    merged.sort(key=lambda r: r["date"].strip())
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path_str = tempfile.mkstemp(
+        dir=path.parent, prefix=path.stem + "_tmp_", suffix=".csv"
+    )
+    tmp_path = Path(tmp_path_str)
+    try:
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames, lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(merged)
+        tmp_path.replace(path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+    return len(to_insert)
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
+def _build_csv_row(
+    obs_date: date,
+    rate: int,
+    source_url: str,
+    extracted_at: str,
+) -> dict[str, str]:
+    """Build a single canonical raw CSV row for an SBV central rate observation."""
+    return {
+        "date": obs_date.isoformat(),
+        "base_currency": BASE_CURRENCY,
+        "quote_currency": QUOTE_CURRENCY,
+        "rate_vnd_per_usd": str(rate),
+        "unit": UNIT,
+        "rate_type": RATE_TYPE,
+        "source_url": source_url,
+        "source_attribution": (
+            f"provider={SOURCE_NAME}; source_id={SOURCE_ID}; "
+            f"upstream={UPSTREAM_SOURCE}; provenance_status={PROVENANCE_STATUS}"
+        ),
+        "source_value": _format_source_value(rate),
+        "extracted_at_utc": extracted_at,
+    }
+
+
+def backfill(
+    start_date: date | None = None,
+    end_date: date | None = None,
+    dry_run: bool = False,
+    include_saturdays: bool = False,
+) -> dict[str, object]:
+    """Recover missing historical USD/VND SBV central reference rates from Algolab.
+
+    Never overwrites existing observations and never uses commercial bank rates.
+    Reports weekdays that are absent from both local storage and Algolab (such as
+    Vietnamese public holidays / SBV non-trading days) as unrecoverable.
+    """
+    import contextlib
+
+    lock_ctx = contextlib.nullcontext(True) if dry_run else file_lock("fx")
+    with lock_ctx as acquired:
+        if not acquired:
+            _log("lock_busy", collector="fx", reason="Another process holds the fx lock; skipping execution")
+            return {"recovered_rows": [], "unrecoverable_dates": []}
+
+        try:
+            settings = _fx_config()
+        except FXSourceUnavailableError as exc:
+            _log("source_unavailable", error=str(exc))
+            sys.exit(1)
+        if settings.get("source_status") == "unavailable":
+            _log("source_unavailable", source_id=settings.get("source_id"), optional=settings.get("optional"))
+            sys.exit(1)
+
+        csv_path = _csv_path()
+        existing_map = _existing_dates_in_csv(csv_path)
+        effective_start = start_date or _first_date_in_csv(csv_path) or date.today()
+        effective_end = end_date or _last_date_in_csv(csv_path) or date.today()
+
+        _log(
+            "backfill_start",
+            start_date=effective_start.isoformat(),
+            end_date=effective_end.isoformat(),
+            dry_run=dry_run,
+            include_saturdays=include_saturdays,
+        )
+
+        try:
+            fetched_pairs = _fetch_history_with_retries(
+                effective_start,
+                effective_end,
+                include_saturdays=include_saturdays,
+            )
+        except requests.HTTPError as exc:
+            _log(
+                "fetch_error",
+                error=str(exc),
+                status_code=exc.response.status_code if exc.response is not None else None,
+            )
+            sys.exit(1)
+        except (FXSourceUnavailableError, FXSourceSchemaError, requests.RequestException) as exc:
+            _log("source_unavailable" if isinstance(exc, FXSourceUnavailableError) else "fetch_error", error=str(exc))
+            sys.exit(1)
+
+        extracted_at = _utcnow_iso()
+        fetched_by_date = dict(fetched_pairs)
+
+        # Verify no conflict with existing observations; never overwrite existing dates
+        for obs_date, rate in fetched_pairs:
+            if obs_date in existing_map and existing_map[obs_date] != rate:
+                raise FXSourceSchemaError(
+                    f"Existing FX rate for {obs_date.isoformat()} ({existing_map[obs_date]}) "
+                    f"differs from fetched rate ({rate}); refusing to overwrite"
+                )
+
+        csv_rows = [
+            _build_csv_row(obs_date, rate, str(settings["source_url"]), extracted_at)
+            for obs_date, rate in fetched_pairs
+            if obs_date not in existing_map
+        ]
+
+        # Identify weekdays in [effective_start, effective_end] absent from both CSV and Algolab
+        unrecoverable_dates: list[str] = []
+        cur = effective_start
+        while cur <= effective_end:
+            if cur.weekday() < 5 and cur not in existing_map and cur not in fetched_by_date:
+                unrecoverable_dates.append(cur.isoformat())
+            cur += timedelta(days=1)
+
+        if unrecoverable_dates:
+            _log(
+                "backfill_unrecoverable_dates",
+                count=len(unrecoverable_dates),
+                dates=unrecoverable_dates,
+            )
+
+        if dry_run:
+            _log(
+                "backfill_dry_run",
+                recoverable_rows=len(csv_rows),
+                dates=[r["date"] for r in csv_rows],
+                unrecoverable_weekdays=len(unrecoverable_dates),
+            )
+            return {
+                "recovered_rows": csv_rows,
+                "unrecoverable_dates": unrecoverable_dates,
+            }
+
+        if not csv_rows:
+            _log("backfill_up_to_date", new_rows=0)
+            return {
+                "recovered_rows": [],
+                "unrecoverable_dates": unrecoverable_dates,
+            }
+
+        try:
+            inserted = _insert_rows_chronologically(csv_path, csv_rows)
+        except OSError as exc:
+            _log("write_error", error=str(exc), path=str(csv_path))
+            sys.exit(1)
+
+        _log(
+            "backfill_done",
+            new_rows=inserted,
+            dates=[r["date"] for r in csv_rows],
+            unrecoverable_weekdays=len(unrecoverable_dates),
+            path=str(csv_path),
+        )
+        return {
+            "recovered_rows": csv_rows,
+            "unrecoverable_dates": unrecoverable_dates,
+        }
+
+
 def run() -> int:
-    """Fetch USD/VND rate and append to CSV if not already present today.
+    """Fetch USD/VND rate (plus any missed working days since last CSV date) and write to CSV.
 
     Returns:
-        Number of new rows added (0 or 1).
+        Number of new rows added.
     """
     with file_lock("fx") as acquired:
         if not acquired:
@@ -399,35 +925,125 @@ def run() -> int:
             _log("up_to_date", date=observation_date.isoformat())
             return 0
 
-        row: dict[str, str] = {
-            "date": observation_date.isoformat(),
-            "base_currency": BASE_CURRENCY,
-            "quote_currency": QUOTE_CURRENCY,
-            "rate_vnd_per_usd": str(rate),
-            "unit": UNIT,
-            "rate_type": RATE_TYPE,
-            "source_url": str(settings["source_url"]),
-            "source_attribution": (
-                f"provider={SOURCE_NAME}; source_id={SOURCE_ID}; "
-                f"upstream={UPSTREAM_SOURCE}; provenance_status={PROVENANCE_STATUS}"
-            ),
-            "source_value": _format_source_value(rate),
-            "extracted_at_utc": _utcnow_iso(),
-        }
+        existing_map = _existing_dates_in_csv(csv_path)
+        last_date = max(existing_map) if existing_map else None
+        source_url = str(settings["source_url"])
+        extracted_at = _utcnow_iso()
+
+        rows_to_write: list[dict[str, str]] = []
+        has_weekday_gap = (
+            last_date is not None
+            and last_date < observation_date
+            and any(
+                (last_date + timedelta(days=offset)).weekday() < 5
+                for offset in range(1, (observation_date - last_date).days)
+            )
+        )
+        if has_weekday_gap and last_date is not None:
+            try:
+                catchup_pairs = _fetch_history_with_retries(
+                    last_date + timedelta(days=1),
+                    observation_date,
+                    include_saturdays=False,
+                )
+            except FXSourceSchemaError as exc:
+                _log("fetch_error", error=str(exc), preserved_last_date=last_date.isoformat())
+                sys.exit(1)
+            except (FXSourceUnavailableError, requests.RequestException) as exc:
+                _log(
+                    "history_catchup_degraded",
+                    reason="history_catchup_failed",
+                    error=str(exc),
+                    preserved_last_date=last_date.isoformat(),
+                    target_observation_date=observation_date.isoformat(),
+                )
+                sys.exit(1)
+
+            catchup_by_date = dict(catchup_pairs)
+            if not catchup_pairs or observation_date not in catchup_by_date:
+                _log(
+                    "history_catchup_degraded",
+                    reason="incomplete_history_response",
+                    preserved_last_date=last_date.isoformat(),
+                    target_observation_date=observation_date.isoformat(),
+                    history_dates_count=len(catchup_pairs),
+                )
+                sys.exit(1)
+
+            if catchup_by_date[observation_date] != rate:
+                _log(
+                    "fetch_error",
+                    error=(
+                        f"Algolab UDF history rate for {observation_date.isoformat()} "
+                        f"({catchup_by_date[observation_date]}) differs from latest HTML rate ({rate})"
+                    ),
+                    preserved_last_date=last_date.isoformat(),
+                )
+                sys.exit(1)
+
+            unobserved_weekdays: list[str] = []
+            cur = last_date + timedelta(days=1)
+            while cur < observation_date:
+                if cur.weekday() < 5 and cur not in catchup_by_date and cur not in existing_map:
+                    unobserved_weekdays.append(cur.isoformat())
+                cur += timedelta(days=1)
+            if unobserved_weekdays:
+                _log(
+                    "catchup_unobserved_weekdays",
+                    count=len(unobserved_weekdays),
+                    dates=unobserved_weekdays,
+                )
+
+            for obs_d, obs_r in catchup_pairs:
+                if obs_d == observation_date:
+                    continue
+                if obs_d in existing_map:
+                    if existing_map[obs_d] != obs_r:
+                        _log(
+                            "fetch_error",
+                            error=(
+                                f"Existing FX rate for {obs_d.isoformat()} ({existing_map[obs_d]}) "
+                                f"differs from fetched rate ({obs_r}); refusing to overwrite"
+                            ),
+                            preserved_last_date=last_date.isoformat(),
+                        )
+                        sys.exit(1)
+                    continue
+                rows_to_write.append(_build_csv_row(obs_d, obs_r, source_url, extracted_at))
+
+        rows_to_write.append(_build_csv_row(observation_date, rate, source_url, extracted_at))
 
         try:
-            _append_to_csv(csv_path, [row])
+            inserted = _insert_rows_chronologically(csv_path, rows_to_write)
+        except FXSourceSchemaError as exc:
+            _log("fetch_error", error=str(exc), path=str(csv_path))
+            sys.exit(1)
         except OSError as exc:
             _log("write_error", error=str(exc), path=str(csv_path))
             sys.exit(1)
 
-        _log("collector_done", date=observation_date.isoformat(), rate=rate, new_rows=1,
+        _log("collector_done", date=observation_date.isoformat(), rate=rate, new_rows=inserted,
              path=str(csv_path))
-        return 1
+        return inserted
 
 
-def main() -> None:
-    run()
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="USD/VND SBV central reference rate collector (Algolab)")
+    parser.add_argument("--backfill", action="store_true", help="Recover missing historical dates in range")
+    parser.add_argument("--start-date", type=date.fromisoformat, default=None, help="Backfill start date (YYYY-MM-DD)")
+    parser.add_argument("--end-date", type=date.fromisoformat, default=None, help="Backfill end date (YYYY-MM-DD)")
+    parser.add_argument("--dry-run", action="store_true", help="Report recoverable rows without writing to CSV")
+    parser.add_argument("--include-saturdays", action="store_true", help="Include Saturday observations when present in Algolab series")
+    args = parser.parse_args(argv)
+    if args.backfill or args.start_date or args.end_date or args.dry_run:
+        backfill(
+            start_date=args.start_date,
+            end_date=args.end_date,
+            dry_run=args.dry_run,
+            include_saturdays=args.include_saturdays,
+        )
+    else:
+        run()
     sys.exit(0)
 
 

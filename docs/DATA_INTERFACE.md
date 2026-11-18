@@ -55,7 +55,7 @@ The run directory contains:
 - Boolean cells are lowercase `true` or `false`.
 - `unit_code` values are exactly `USD/bbl`, `VND/USD`, and `VND/liter`, matched to their series/table. The panel also has explicit per-feature unit columns.
 - Do not rename, reorder, drop, or reinterpret v3 columns locally. If an interface change is needed, coordinate it, increment the schema version, update parsers/consumers, and publish a new run.
-- Stabilization-fund fields are maintained in `data/manual/stabilization_fund_annotations.csv`, keyed by product and source record date. Amounts are VND/liter, except mazut which is VND/kg. `stabilization_fund_subsidy` is derived as `1` when the confirmed amount is positive and `0` when the official source confirms no spending. Blank values mean the period has not been verified. PVOIL does not provide this information.
+- Stabilization-fund fields are maintained in `data/manual/stabilization_fund_annotations.csv`, keyed by product and source record date. Amounts are VND/liter, except mazut which is VND/kg. `stabilization_fund_subsidy` is derived as `1` when the confirmed amount is positive and `0` when the official source confirms no spending. Blank values mean the period has not been verified. Domestic retail fuel sources (COMECO, PVOIL) do not provide this information.
 - Join Brent/FX to fuel only using the selected observation date and snapshot IDs in `fuel_market_panel.csv`. The selected date must be strictly earlier than the event's local calendar date. NULL market features mean no earlier observed value was available in the source snapshot.
 
 ## Product IDs

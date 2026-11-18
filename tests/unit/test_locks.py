@@ -125,7 +125,7 @@ class TestLockContention:
 
         from petrotwin.collectors import locks
         with patch("fcntl.flock", side_effect=eacces_exc):
-            with locks.file_lock("domestic_fuel", non_blocking=True) as acquired:
+            with locks.file_lock("comeco", non_blocking=True) as acquired:
                 assert acquired is False
 
     def test_contention_blocking_non_blocking_raises_lock_busy(self, tmp_path, monkeypatch):
@@ -207,7 +207,7 @@ class TestLockNameValidation:
     @pytest.mark.parametrize("valid_name", [
         "brent",
         "fx",
-        "domestic_fuel",
+        "comeco",
         "runner",
         "petrotwin_pipeline",
     ])
