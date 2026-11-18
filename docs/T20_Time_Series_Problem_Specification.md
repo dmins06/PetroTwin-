@@ -303,5 +303,3 @@ Before implementation, the team should confirm:
 4. how stale or missing Brent/FX inputs affect forecast eligibility;
 5. the supported BOG label definition and whether additional verified labels exist;
 6. whether a quantitative BOG scenario formula can be sourced and independently verified.
-
-T20 is ready for implementation handoff when the team agrees on the product inclusion policy, forecast-origin semantics, missing/stale-input policy, BOG label scope and forecast-record ownership. The current COMECO collector and data pipeline are the source foundation; they are not themselves a forecasting model.
