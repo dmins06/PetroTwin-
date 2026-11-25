@@ -117,9 +117,14 @@ Measures the negative log-likelihood of the true class probability.
 LogLoss = -\frac{1}{N}\sum_{i=1}^{N}\log(p_{i,y_i})
 \]
 
-Brier Score and Log-loss require probability predictions for all three classes. Hard class predictions alone are insufficient.
+Brier Score and Log-loss require probability predictions (either 3-class probability matrix `(N, 3)` summing to `1.0` or binary `P(SPEND)` probabilities in `[0, 1]`).
 
-These metrics remain pending until a BOG classifier provides valid probability outputs.
+Probability validation & clipping rules (implemented in `src/petrotwin/evaluation/metrics.py::compute_bog_metrics`):
+- Reject NaN/Inf probabilities, values outside `[0, 1]`, or multiclass rows not summing to `1.0` (`atol = 1e-5`).
+- Clip probabilities to `[1e-15, 1 - 1e-15]` (`PROB_CLIP_EPS = 1e-15`) before computing `Log-loss` so exact `0.0` or `1.0` probabilities never produce `inf` or `NaN`.
+- Binary F1 for `positive_class = 1` (`SPEND`) uses explicit classification `threshold = 0.5` (configurable), clearly separated from probability calibration metrics (`Brier Score`, `Log-loss`).
+- Report `class_counts` and `imbalance_ratio` to expose label imbalance explicitly.
+- Aggregation (`aggregate_regression_metrics`) refuses to pool mixed `unit_code` values (e.g., `VND/liter` vs `VND/kg`) unless `unit_code` is included in `group_cols`.
 
 ## 4. Edge Cases and Missing Data
 
@@ -202,7 +207,7 @@ The table is a reporting template. Dashes indicate metrics not yet calculated.
 - BOG evaluation remains provisional.
 - Brier Score and Log-loss cannot be computed until probability outputs are available.
 - Regression evaluation must respect point-in-time availability and leakage-prevention rules from T21.
-- Metric implementation and empirical evaluation are separate tasks; this document defines the specification, not experimental results.
+- Reference implementation: `src/petrotwin/evaluation/metrics.py` (`compute_regression_metrics`, `compute_bog_metrics`, `aggregate_regression_metrics`, `evaluate_baselines_on_t21`), `src/petrotwin/evaluation/splits.py`, and unit tests in `tests/unit/test_metrics_t24.py`.
 
 ## 8. References
 

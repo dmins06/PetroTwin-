@@ -138,32 +138,32 @@ Trong code, baseline được xây dựng từ các sự kiện trước sự ki
 
 Đây là các đặc trưng liên tục và nhị phân, chưa có ngưỡng cố định để kết luận một đợt tăng giá là bất thường.
 
-## 3. Exogenous Features
+## 3. Exogenous & Intra-cycle Volatility Features
 
-Các biến ngoại sinh được hỗ trợ trong code đầu vào gồm:
+Các biến ngoại sinh được hỗ trợ trong `src/petrotwin/features/pipeline.py` (nối điểm thời gian với `market_observation.csv` theo điều kiện nghiêm ngặt `observation_date < origin_date`, `allow_exact_matches=False`, và `fx_max_age_days=7`):
 
-| Variable | Description |
-|---|---|
-| `brent_usd_per_barrel` | Giá dầu Brent theo USD/thùng |
-| `brent_age_days` | Tuổi dữ liệu Brent tính theo ngày |
-| `usd_vnd_rate` | Tỷ giá USD/VND |
-| `fx_age_days` | Tuổi dữ liệu tỷ giá tính theo ngày |
-
-Code có thể tạo Lag và Rolling cho `brent_usd_per_barrel` và `usd_vnd_rate` khi các cột này xuất hiện trong panel.
-
-**Current status:** Chưa được đưa vào danh sách predictor được phê duyệt bởi `get_feature_columns()`.
-
-**Reason:** Cần có `available_at` để xác định chính xác thời điểm dữ liệu Brent và tỷ giá thực sự có sẵn. Không được thay thế timestamp này bằng `retrieved_at_utc` nếu chưa chứng minh được tính tương đương.
+| Feature Pattern | Đơn vị | Mô tả |
+|---|---|---|
+| `brent_usd_per_barrel_lag_{n}`, `usd_vnd_rate_lag_{n}` | `USD/bbl`, `VND/USD` | Giá trị trễ `n ∈ {1, 2, 3, 5}` kỳ điều hành trước đó |
+| `brent_usd_per_barrel_rolling_mean_{n}`, `brent_usd_per_barrel_rolling_std_{n}` | `USD/bbl` | Trung bình và độ lệch chuẩn trượt `n ∈ {3, 5, 7}` kỳ trước |
+| `usd_vnd_rate_rolling_mean_{n}`, `usd_vnd_rate_rolling_std_{n}` | `VND/USD` | Trung bình và độ lệch chuẩn trượt `n ∈ {3, 5, 7}` kỳ trước |
+| `brent_vnd_implied`, `brent_vnd_per_liter_proxy` | `VND/bbl`, `VND/liter` | Giá Brent quy đổi sang VND và xấp xỉ theo lít (`÷ 158.9873`) |
+| `brent_change_since_previous_event`, `brent_pct_change_since_previous_event` | `USD/bbl`, `ratio` | Biến động Brent giữa hai kỳ điều hành |
+| `fx_pct_change_since_previous_event` | `ratio` | Tỷ lệ thay đổi tỷ giá USD/VND giữa hai kỳ điều hành |
 
 ## 4. Intra-cycle Volatility Features
 
-**Status: Not implemented / Pending data availability.**
+Được tính khi truyền `market_observations` vào `build_features()` hoặc `FoldFeaturePipeline` (chỉ sử dụng dữ liệu ngày giao dịch có `observation_date < origin_date`):
 
-Nhóm đặc trưng này dự kiến mô tả biến động giá thị trường trong khoảng thời gian giữa hai kỳ điều chỉnh giá xăng dầu.
+| Feature | Đơn vị | Mô tả |
+|---|---|---|
+| `brent_ret_1d`, `brent_ret_7d` | `ratio` | Biến động Brent 1 phiên và 7 phiên trước `origin_date` |
+| `brent_rolling_mean_7d`, `brent_rolling_std_7d` | `USD/bbl` | Trung bình và độ lệch chuẩn 7 phiên của Brent |
+| `brent_intra_cycle_volatility`, `brent_intra_cycle_range` | `ratio`, `USD/bbl` | Độ lệch chuẩn lợi suất ngày và biên độ `max - min` 7 phiên nội kỳ của Brent |
+| `fx_ret_1d`, `fx_ret_7d`, `fx_rolling_mean_7d`, `fx_rolling_std_7d` | `ratio`, `VND/USD` | Biến động và thống kê trượt 7 ngày của USD/VND (`NaN` nếu quá `fx_max_age_days=7`) |
+| `fx_intra_cycle_volatility`, `fx_intra_cycle_range` | `ratio`, `VND/USD` | Độ biến động lợi suất ngày và biên độ 7 ngày nội kỳ của USD/VND |
 
-Tuy nhiên, dữ liệu hiện tại chưa đảm bảo đầy đủ timestamp công bố dữ liệu theo yêu cầu point-in-time của T21.
-
-Vì vậy, chưa đưa các đặc trưng Intra-cycle Volatility vào danh sách predictor được sử dụng.
+Tất cả các biến trên được kiểm soát qua `get_feature_columns(features, include_exogenous=True)`. Nếu truyền trực tiếp `panel` không có `market_observations`, pipeline vẫn kiểm tra bắt buộc `brent_observation_date < effective_date` và `fx_observation_date < effective_date`.
 
 ## 5. Fold-specific Feature Pipeline
 
@@ -255,8 +255,12 @@ Các nội dung đã được kiểm thử:
 | Missing BOG is not converted to NO_ACTION | PASS |
 | BOG histories are separated by product | PASS |
 | Price anomaly features use past events only | PASS |
+| Market as-of join enforces strict prior date & intra-cycle volatility | PASS |
+| Panel same-day market date raises leakage error | PASS |
+| `price_increase_positive_lag_1` preserves NaN | PASS |
+| Fold pipeline imputation & live inference without target | PASS |
 
-**Latest test result:** 11 passed.
+**Latest test result:** 15 passed (`tests/unit/test_feature_engineering.py`).
 
 ---
 

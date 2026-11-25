@@ -240,3 +240,99 @@ def test_price_anomaly_features_use_past_events_only():
     assert "price_change_mean_3" in columns
     assert "price_change_std_3" in columns
     assert "price_increase_zscore_lag_1" in columns
+
+
+
+# ============================================================
+# POINT-IN-TIME MARKET, INTRA-CYCLE, IMPUTATION & LIVE INFERENCE TESTS
+# ============================================================
+
+def test_market_asof_join_enforces_strict_prior_date_and_intra_cycle_vol():
+    panel = pd.DataFrame({
+        "product_id": ["RON95"] * 3,
+        "effective_at_local": [
+            "2025-01-09 15:00:00+07:00",
+            "2025-01-16 15:00:00+07:00",
+            "2025-01-30 15:00:00+07:00",
+        ],
+        "price_value": [20000, 20500, 21000],
+    })
+    market = pd.DataFrame({
+        "series_id": [
+            "brent_dated_usd_bbl",
+            "brent_dated_usd_bbl",
+            "brent_dated_usd_bbl",
+            "brent_dated_usd_bbl",
+            "usd_vnd_sbv_reference",
+            "usd_vnd_sbv_reference",
+            "usd_vnd_sbv_reference",
+        ],
+        "observation_date": [
+            "2025-01-06",
+            "2025-01-07",
+            "2025-01-08",
+            "2025-01-09",  # same day as 2025-01-09 event -> MUST NOT BE USED
+            "2025-01-08",
+            "2025-01-09",  # same day -> MUST NOT BE USED
+            "2025-01-15",  # >7d before 2025-01-30 -> stale on 2025-01-30
+        ],
+        "value": [74.0, 75.0, 76.0, 999.0, 24000.0, 99999.0, 24100.0],
+    })
+
+    result = build_features(panel, market_observations=market, fx_max_age_days=7)
+
+    # Same-day 999.0 / 99999.0 must NOT leak into 2025-01-09
+    assert result.loc[0, "brent_usd_per_barrel"] == 76.0
+    assert result.loc[0, "usd_vnd_rate"] == 24000.0
+    assert pd.notna(result.loc[0, "brent_intra_cycle_volatility"])
+    # On 2025-01-30, latest FX is 2025-01-15 (15d > 7d) -> must be NaN
+    assert pd.isna(result.loc[2, "usd_vnd_rate"])
+
+    cols = get_feature_columns(result, include_exogenous=True)
+    assert "brent_intra_cycle_volatility" in cols
+    assert "brent_vnd_implied" in cols
+
+
+def test_panel_same_day_market_date_raises_leakage_error():
+    panel = pd.DataFrame({
+        "product_id": ["RON95"],
+        "effective_at_local": ["2025-01-09 15:00:00+07:00"],
+        "price_value": [20000],
+        "brent_observation_date": ["2025-01-09"],
+        "brent_usd_per_barrel": [75.0],
+    })
+    with pytest.raises(ValueError, match="Point-in-time leakage detected"):
+        build_features(panel)
+
+
+def test_price_increase_positive_preserves_nan():
+    panel = pd.DataFrame({
+        "product_id": ["RON95"] * 3,
+        "effective_at_local": pd.date_range("2025-01-01", periods=3, freq="7D"),
+        "price_value": [20000, 20500, 20300],
+        "price_change_value": [None, 500, -200],
+    })
+    result = build_features(panel)
+    assert pd.isna(result.loc[0, "price_increase_positive_lag_1"])
+    assert pd.isna(result.loc[1, "price_increase_positive_lag_1"])
+    assert result.loc[2, "price_increase_positive_lag_1"] == 1.0
+
+
+def test_fold_pipeline_imputation_and_live_inference_without_target(sample_panel):
+    train = sample_panel[sample_panel["effective_at_local"] <= "2024-03-01"]
+    live = sample_panel[sample_panel["effective_at_local"] > "2024-03-01"].drop(
+        columns=["price_value"]
+    )
+
+    pipe = FoldFeaturePipeline(impute=True)
+    tr_out = pipe.fit_transform(train)
+    medians_snapshot = pipe._medians.copy()
+
+    live_out = pipe.transform(live)
+    pd.testing.assert_series_equal(pipe._medians, medians_snapshot)
+    assert not tr_out[pipe.feature_columns_].isna().any().any()
+    assert not live_out[pipe.feature_columns_].isna().any().any()
+
+    # Out-of-order transform timestamp must raise ValueError
+    with pytest.raises(ValueError, match="strictly after"):
+        pipe.transform(train.iloc[[-1]])

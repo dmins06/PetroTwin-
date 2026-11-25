@@ -1,0 +1,34 @@
+# PetroTwin M3 T23 - Reproducible Baseline Configuration
+# Uses the exact chronological validation splits defined in configs/validation.yaml (T21).
+
+schema_version: petrotwin-baseline-v1
+random_seed: 42
+validation_config: configs/validation.yaml
+target_column: price_value
+product_column: product_id
+time_column: effective_at_local
+origin_time_column: forecast_origin_local
+horizon: 1
+
+models:
+  naive_persistence:
+    enabled: true
+    model_version: "naive-persistence-v1"
+    cold_start_policy: "global_median"
+    description: "Predicts the latest known official price for the same product_id at or before forecast_origin_local."
+
+  seasonal_naive:
+    enabled: true
+    model_version: "seasonal-naive-7D-v1"
+    seasonal_period: "7D"
+    tolerance: "1D"
+    fallback: "persistence"
+    cold_start_policy: "global_median"
+    description: "Predicts the official price closest to origin_time - 7D (Decree 80/2023/ND-CP weekly cycle) within +/-1D tolerance; falls back to persistence if absent."
+
+assumptions:
+  - "Both baselines are 100% deterministic (zero stochasticity)."
+  - "Only historical observations with effective_at_local <= forecast_origin_local are eligible."
+  - "Cold-start products introduced during validation (e.g. diesel_0001s_v, gasoline_e10_ron95_iii) use global_median fallback during backtesting."
+  - "Because Vietnam operates a ~7-day adjustment cycle since late 2023, seasonal_period=7D may frequently match the same prior event as Naive Persistence; overlap_rate and fallback_rate must be reported."
+  - "Evaluated strictly on T21 Validation folds (2024-01-01..2025-12-31); Final Test (2026) remains locked."

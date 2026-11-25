@@ -586,7 +586,7 @@ def test_run_appends_when_same_date_but_different_time(monkeypatch, tmp_path):
     # New announcement is on the SAME date 12/11/2026, but at 15:00
     monkeypatch.setattr(comeco, "_fetch_html", lambda **kwargs: valid_comeco_html("12/11/2026", "15:00"))
 
-    added = comeco.run()
+    added = comeco.run(current_date=date(2026, 11, 16))
     assert added == 4
 
     rows = []

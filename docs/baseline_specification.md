@@ -52,15 +52,22 @@ Trong đó:
 - \(t_s\) là thời điểm mục tiêu của chu kỳ tuần trước.
 - Quan sát được chọn phải thuộc cùng sản phẩm và nằm trong khoảng thời gian cho phép.
 
-### 3.2. Cấu hình
+### 3.2. Cấu hình (`configs/baseline.yaml`)
 
 | Tham số | Giá trị mặc định | Ý nghĩa |
 |---|---|---|
-| seasonal_period | 7D | Chu kỳ mùa vụ một tuần |
-| tolerance | 1D | Sai lệch tối đa một ngày so với thời điểm mục tiêu |
-| fallback | persistence | Dùng Naive Persistence nếu không tìm thấy quan sát mùa vụ phù hợp |
+| `seasonal_period` | `7D` | Chu kỳ điều hành 7 ngày theo Nghị định 80/2023/NĐ-CP |
+| `tolerance` | `1D` | Sai lệch tối đa một ngày so với thời điểm mục tiêu |
+| `fallback` | `persistence` | Dùng Naive Persistence nếu không tìm thấy quan sát mùa vụ phù hợp |
+| `horizon` | `1` | Bước dự báo mục tiêu (`h = 1` kỳ điều hành kế tiếp) |
+| `cold_start_policy` | `raise` (`global_median` khi backtest T21) | Chính sách xử lý sản phẩm mới chưa có lịch sử trước `origin_time` (median học chỉ trên `train_df`) |
 
 Nếu có nhiều quan sát phù hợp, chọn quan sát có khoảng cách thời gian nhỏ nhất. Nếu khoảng cách bằng nhau, ưu tiên quan sát mới hơn.
+
+Cả `NaivePersistenceBaseline` và `SeasonalNaiveBaseline` đều hỗ trợ:
+- `predict(forecast_origins, origin_time_col=..., additional_history=...)`: giữ thống kê `fit()` thuần trên tập `train` đồng thời cho phép walk-forward nhân quả (`effective_at_local <= origin_time`).
+- `get_metadata()`: xuất cấu hình tái lập đầy đủ.
+- Tích hợp trực tiếp với T21 (`configs/validation.yaml`) thông qua `petrotwin.evaluation.evaluate_baselines_on_t21()` (giữ khóa Final Test 2026 và báo cáo `fallback_rate_pct` cùng `naive_seasonal_overlap_pct`).
 
 ### 3.3. Giả định và giới hạn
 
@@ -114,9 +121,10 @@ Kết quả kiểm thử hiện tại:
 
 | Nhóm kiểm thử | Số test | Kết quả |
 |---|---:|---|
-| Baseline | 10 | PASS |
-| Feature Engineering (T22) | 11 | PASS |
-| Tổng | 21 | PASS |
+| Baseline (`tests/unit/test_baselines.py`) | 13 | PASS |
+| Feature Engineering (`tests/unit/test_feature_engineering.py`) | 15 | PASS |
+| Metric Design (`tests/unit/test_metrics_t24.py`) | 4 | PASS |
+| Tổng | 32 | PASS |
 
 ## 7. Giới hạn và hướng phát triển
 
