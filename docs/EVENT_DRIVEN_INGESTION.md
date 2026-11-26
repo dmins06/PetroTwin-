@@ -60,10 +60,10 @@ Create a **Fine-Grained Personal Access Token (PAT)** scoped **only** to `dmins0
 | **Contents** | Read and write | Send `repository_dispatch` (`POST /dispatches`) and read/write `source_fingerprints.json` on branch `state/detector` |
 | **Actions** | Read-only | Query exact workflow run status in `reconcile_pending_dispatch()` |
 
-Store this PAT as repository secret **`GITHUB_DISPATCH_TOKEN`**.
+Store this PAT as repository secret **`PETROTWIN_DISPATCH_TOKEN`** (GitHub reserves the `GITHUB_` prefix for built-in secrets).
 
-- `.github/workflows/petrotwin-detect.yml` uses **only** `GITHUB_DISPATCH_TOKEN` (no TiDB secrets; `GITHUB_TOKEN` stays `contents: read`).
-- `.github/workflows/petrotwin-update.yml` keeps existing TiDB variables/secrets (`PETROTWIN_DB_HOST`, `PETROTWIN_DB_PORT`, `PETROTWIN_DB_NAME`, `PETROTWIN_DB_USER`, `PETROTWIN_DB_PASSWORD`) plus optional `GITHUB_DISPATCH_TOKEN` for immediate post-success state confirmation.
+- `.github/workflows/petrotwin-detect.yml` uses **only** `PETROTWIN_DISPATCH_TOKEN` (no TiDB secrets; `GITHUB_TOKEN` stays `contents: read`).
+- `.github/workflows/petrotwin-update.yml` keeps existing TiDB variables/secrets (`PETROTWIN_DB_HOST`, `PETROTWIN_DB_PORT`, `PETROTWIN_DB_NAME`, `PETROTWIN_DB_USER`, `PETROTWIN_DB_PASSWORD`) plus optional `PETROTWIN_DISPATCH_TOKEN` for immediate post-success state confirmation.
 
 ---
 

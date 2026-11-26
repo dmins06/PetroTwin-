@@ -208,6 +208,8 @@ def test_petrotwin_detect_workflow_is_free_lightweight_and_loop_safe():
     assert wf["concurrency"]["cancel-in-progress"] is False
     # Zero TiDB credentials in lightweight detector workflow
     assert "PETROTWIN_DB_" not in raw_text
+    assert "secrets.PETROTWIN_DISPATCH_TOKEN" in raw_text
+    assert "GITHUB_DISPATCH_TOKEN" not in raw_text
     assert "--state-backend github" in raw_text
     assert "--state-branch state/detector" in raw_text
     assert "--dispatch" in raw_text
@@ -633,6 +635,19 @@ def test_petrotwin_update_workflow_hardening_target_branch_and_step_ordering():
     assert "always(" not in confirm_if
     assert "failure(" not in confirm_if
     assert "--confirm-dispatch-id" in confirm_step["run"]
+    assert "secrets.PETROTWIN_DISPATCH_TOKEN" in raw_text
+    assert "GITHUB_DISPATCH_TOKEN" not in raw_text
+
+
+def test_missing_dispatch_token_raises_clear_error(tmp_path: Path):
+    state_file = _seed_state(tmp_path)
+    checkers = _unchanged_checkers()
+    checkers["fx"] = lambda: SourceCheckResult(
+        "fx", True, compute_content_fingerprint({"fx": "2026-11-25:25679"}), "2026-11-25"
+    )
+    report = detect_source_changes(checkers=checkers, state_path=state_file)
+    with pytest.raises(ValueError, match="PETROTWIN_DISPATCH_TOKEN"):
+        trigger_repository_dispatch("dmins06/PetroTwin-", "", report)
 
 
 def test_git_pathspec_stages_only_tracked_csv_files_under_data_raw(tmp_path: Path):

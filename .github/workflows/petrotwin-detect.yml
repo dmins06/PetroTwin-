@@ -36,11 +36,11 @@ jobs:
       - name: Validate detector token configuration
         shell: bash
         env:
-          GITHUB_DISPATCH_TOKEN: ${{ secrets.GITHUB_DISPATCH_TOKEN }}
+          PETROTWIN_DISPATCH_TOKEN: ${{ secrets.PETROTWIN_DISPATCH_TOKEN }}
         run: |
           set -euo pipefail
-          test -n "$GITHUB_DISPATCH_TOKEN" || {
-            echo "::error::Missing repository secret GITHUB_DISPATCH_TOKEN (requires Contents: Read/Write and Actions: Read)"
+          test -n "$PETROTWIN_DISPATCH_TOKEN" || {
+            echo "::error::Missing repository secret PETROTWIN_DISPATCH_TOKEN (requires Contents: Read/Write and Actions: Read)"
             exit 1
           }
 
@@ -49,7 +49,7 @@ jobs:
         env:
           PYTHONPATH: src
           GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_DISPATCH_TOKEN: ${{ secrets.GITHUB_DISPATCH_TOKEN }}
+          PETROTWIN_DISPATCH_TOKEN: ${{ secrets.PETROTWIN_DISPATCH_TOKEN }}
         run: |
           set -euo pipefail
           python -m petrotwin.collectors.change_detector \
