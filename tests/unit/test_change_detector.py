@@ -214,6 +214,13 @@ def test_petrotwin_detect_workflow_is_free_lightweight_and_loop_safe():
     assert "--state-branch state/detector" in raw_text
     assert "--dispatch" in raw_text
 
+    checkout_step = next(
+        s for s in wf["jobs"]["detect-changes"]["steps"] if s["name"] == "Checkout repository"
+    )
+    sparse = str(checkout_step.get("with", {}).get("sparse-checkout", ""))
+    assert "src/petrotwin" in sparse
+    assert "configs/collectors.yaml" in sparse
+
 
 
 def test_brent_historical_correction_changes_fingerprint(monkeypatch):
@@ -648,6 +655,27 @@ def test_missing_dispatch_token_raises_clear_error(tmp_path: Path):
     report = detect_source_changes(checkers=checkers, state_path=state_file)
     with pytest.raises(ValueError, match="PETROTWIN_DISPATCH_TOKEN"):
         trigger_repository_dispatch("dmins06/PetroTwin-", "", report)
+
+
+def test_fx_config_loads_independently_of_working_directory(tmp_path: Path, monkeypatch):
+    from petrotwin.collectors import fx as fx_collector
+
+    monkeypatch.chdir(tmp_path)
+    settings = fx_collector._fx_config()
+    assert isinstance(settings, dict)
+    assert settings["source_id"] == "algolab_sbv_central_rate"
+    assert settings["source_status"] == "enabled"
+
+
+def test_fx_config_missing_file_raises_clear_error(tmp_path: Path, monkeypatch):
+    from petrotwin.collectors import fx as fx_collector
+
+    monkeypatch.setattr(fx_collector, "_repo_root", lambda: tmp_path)
+    with pytest.raises(
+        fx_collector.FXSourceUnavailableError,
+        match="Could not load FX source configuration",
+    ):
+        fx_collector._fx_config()
 
 
 def test_git_pathspec_stages_only_tracked_csv_files_under_data_raw(tmp_path: Path):

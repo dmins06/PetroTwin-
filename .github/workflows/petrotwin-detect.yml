@@ -23,6 +23,7 @@ jobs:
         with:
           sparse-checkout: |
             src/petrotwin
+            configs/collectors.yaml
           sparse-checkout-cone-mode: false
 
       - name: Set up Python
