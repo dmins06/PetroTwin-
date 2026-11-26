@@ -91,7 +91,18 @@ jobs:
           }
 
       - name: Run T14 collection and database publishing
-        run: python -m petrotwin.collectors.runner
+        shell: bash
+        env:
+          CHANGED_SOURCES: ${{ toJSON(github.event.client_payload.changed_sources) }}
+        run: |
+          set -euo pipefail
+          EXTRA_ARGS=()
+          if [ "${GITHUB_EVENT_NAME}" = "repository_dispatch" ]; then
+            if python3 -c 'import json, os, sys; raw = os.environ.get("CHANGED_SOURCES", "[]"); srcs = json.loads(raw) if raw and raw != "null" else []; sys.exit(0 if "fx" in srcs else 1)'; then
+              EXTRA_ARGS+=(--require-source fx)
+            fi
+          fi
+          python -m petrotwin.collectors.runner ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 
       - name: Commit updated tracked raw data
         shell: bash
@@ -116,12 +127,12 @@ jobs:
         env:
           PYTHONPATH: src
           GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_DISPATCH_TOKEN: ${{ secrets.GITHUB_DISPATCH_TOKEN }}
+          PETROTWIN_DISPATCH_TOKEN: ${{ secrets.PETROTWIN_DISPATCH_TOKEN }}
           DISPATCH_ID: ${{ github.event.client_payload.dispatch_id }}
         run: |
           set -euo pipefail
-          if [ -z "${GITHUB_DISPATCH_TOKEN:-}" ]; then
-            echo "GITHUB_DISPATCH_TOKEN not set; state/detector will be reconciled by petrotwin-detect.yml."
+          if [ -z "${PETROTWIN_DISPATCH_TOKEN:-}" ]; then
+            echo "PETROTWIN_DISPATCH_TOKEN not set; state/detector will be reconciled by petrotwin-detect.yml."
             exit 0
           fi
           python -m petrotwin.collectors.change_detector \

@@ -377,6 +377,13 @@ def main() -> None:
         "--config", type=Path, default=None,
         help="Collector YAML config (default: <repo>/configs/collectors.yaml).",
     )
+    parser.add_argument(
+        "--require-source",
+        action="append",
+        default=[],
+        choices=("brent", "fx", "comeco"),
+        help="Treat the given collector source as required even if marked optional in config.",
+    )
     args = parser.parse_args()
 
     if args.pipeline_only and args.dry_run:
@@ -423,7 +430,11 @@ def main() -> None:
                 timeout_seconds=runner_timeout,
             )
 
+        required_overrides = set(args.require_source or ())
+
         def collector_is_optional(section: str) -> bool:
+            if section in required_overrides:
+                return False
             settings = collector_config.get(section, {})
             return settings.get("optional", False) is True
 

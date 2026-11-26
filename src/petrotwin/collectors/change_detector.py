@@ -594,7 +594,7 @@ def trigger_repository_dispatch(
     if not repo or "/" not in repo:
         raise ValueError("repo must be in 'owner/name' format.")
     if not token:
-        raise ValueError("GITHUB_DISPATCH_TOKEN must be set before dispatching.")
+        raise ValueError("PETROTWIN_DISPATCH_TOKEN must be set before dispatching.")
     if not report.should_trigger:
         return 0
 
@@ -683,7 +683,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    token = os.getenv("GITHUB_DISPATCH_TOKEN", "")
+    token = os.getenv("PETROTWIN_DISPATCH_TOKEN", "")
     github_store = (
         GitHubBranchStateStore(
             repo=args.repo,
