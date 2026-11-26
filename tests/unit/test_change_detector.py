@@ -678,6 +678,94 @@ def test_fx_config_missing_file_raises_clear_error(tmp_path: Path, monkeypatch):
         fx_collector._fx_config()
 
 
+def test_runner_require_source_fx_enforces_fx_success_and_blocks_partial_publish(
+    tmp_path: Path, monkeypatch
+):
+    from petrotwin.collectors import runner
+
+    config_text = "brent:\n  optional: false\nfx:\n  optional: true\ncomeco:\n  optional: false\n"
+
+    def _run(case_dir: Path, fx_result: tuple[int, str | None], argv: list[str]):
+        (case_dir / "configs").mkdir(parents=True, exist_ok=True)
+        (case_dir / "configs" / "collectors.yaml").write_text(config_text, encoding="utf-8")
+        called: list[str] = []
+
+        def fake_collector(module: str, **kwargs):
+            if module == "petrotwin.collectors.fx":
+                return fx_result
+            return (1, None)
+
+        def fake_pipeline(*args):
+            called.append("pipeline")
+            return ("ok", None)
+
+        def fake_loader():
+            called.append("loader")
+            return ("ok", None)
+
+        monkeypatch.setattr(runner, "_repo_root", lambda: case_dir)
+        monkeypatch.setattr(runner, "_utcnow_iso", lambda: "2026-11-26T00:00:00Z")
+        monkeypatch.setattr(runner, "_run_collector", fake_collector)
+        monkeypatch.setattr(runner, "_run_pipeline", fake_pipeline)
+        monkeypatch.setattr(runner, "_run_loader", fake_loader)
+        monkeypatch.setenv("PETROTWIN_DB_HOST", "mock-host")
+        monkeypatch.setattr(runner.sys, "argv", argv)
+        with pytest.raises(SystemExit) as exc:
+            runner.main()
+        log_text = (case_dir / "logs" / "collector_run.log").read_text(encoding="utf-8")
+        return exc.value.code, called, log_text
+
+    # 1. FX in changed_sources (--require-source fx) and FX succeeds -> runs pipeline + loader, exit 0
+    code_ok, called_ok, log_ok = _run(
+        tmp_path / "fx_req_ok", (1, None), ["runner", "--require-source", "fx"]
+    )
+    assert code_ok == 0
+    assert called_ok == ["pipeline", "loader"]
+    assert '"overall_status": "success"' in log_ok
+
+    # 2. FX in changed_sources (--require-source fx) and FX fails -> skips pipeline & loader, exit 1
+    code_fail, called_fail, log_fail = _run(
+        tmp_path / "fx_req_fail", (-1, "FX down"), ["runner", "--require-source", "fx"]
+    )
+    assert code_fail == 1
+    assert called_fail == []
+    assert '"overall_status": "failed"' in log_fail
+    assert '"pipeline_status": "skipped"' in log_fail
+    assert '"loader_status": "skipped"' in log_fail
+
+    # 3. FX NOT in changed_sources (no --require-source fx) and FX fails -> optional behavior preserved
+    code_opt, called_opt, log_opt = _run(
+        tmp_path / "fx_opt_fail", (-1, "FX down"), ["runner"]
+    )
+    assert code_opt == 0
+    assert called_opt == ["pipeline", "loader"]
+    assert '"overall_status": "partial"' in log_opt
+
+
+def test_update_workflow_requires_fx_only_when_dispatched_for_fx():
+    wf_path = Path(".github/workflows/petrotwin-update.yml")
+    wf = yaml.safe_load(wf_path.read_text(encoding="utf-8"))
+    steps = wf["jobs"]["update-data"]["steps"]
+    step_names = [s["name"] for s in steps]
+    run_step = next(s for s in steps if s["name"] == "Run T14 collection and database publishing")
+    confirm_step = next(s for s in steps if s["name"] == "Confirm published dispatch state")
+
+    run_script = run_step["run"]
+    assert "set -euo pipefail" in run_script
+    assert 'GITHUB_EVENT_NAME' in run_script
+    assert '"repository_dispatch"' in run_script
+    assert "--require-source fx" in run_script
+    assert "CHANGED_SOURCES" in run_step["env"]
+
+    # Runner failure blocks commit and dispatch confirmation (no always()/failure())
+    assert step_names.index("Run T14 collection and database publishing") < step_names.index(
+        "Confirm published dispatch state"
+    )
+    confirm_if = str(confirm_step.get("if", ""))
+    assert "always(" not in confirm_if
+    assert "failure(" not in confirm_if
+
+
 def test_git_pathspec_stages_only_tracked_csv_files_under_data_raw(tmp_path: Path):
     import subprocess
 
