@@ -6,6 +6,18 @@
     "domestic_fuel": "59c87f8c25debcd4b688ed20e478d2639f88bf83752853e86cb7d3e58086faa1",
     "fx": "5bc980bb51ba06659b640d5272da33fefeb68dc0ca9c7effe8a69fe842face11"
   },
-  "pending_dispatch": null,
+  "pending_dispatch": {
+    "change_bundle_id": "89451dca3c005538f9eb379416b00772ac5c0e7d4cfd5e77543263ef6b52b5c5",
+    "changed_sources": [
+      "domestic_fuel"
+    ],
+    "dispatch_id": "disp-89451dca3c00-20261126T105400",
+    "dispatched_at_utc": "2026-11-26T10:54:00.558592Z",
+    "fingerprints": {
+      "brent": "4779a29e775c1a7e2f0fc342a9500c6942737c6ace917790edab6eeb4b537077",
+      "domestic_fuel": "22b4498247b4328b971d079de06b489ac320525bc56380a7931b5e9cc34cfa54",
+      "fx": "5bc980bb51ba06659b640d5272da33fefeb68dc0ca9c7effe8a69fe842face11"
+    }
+  },
   "schema_version": "petrotwin-detector-state-v1"
 }
