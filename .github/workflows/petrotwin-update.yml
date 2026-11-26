@@ -1,10 +1,11 @@
-name: PetroTwin Daily Data Update
+name: PetroTwin Event-Driven Data Update
+run-name: "PetroTwin Update [${{ github.event.client_payload.dispatch_id || github.event.client_payload.change_bundle_id || github.event_name }}]"
 
 on:
   workflow_dispatch:
-  schedule:
-    # 16:00 Vietnam time (UTC+7)
-    - cron: "0 9 * * *"
+  repository_dispatch:
+    types:
+      - petrotwin_new_data
 
 permissions:
   contents: write
@@ -19,6 +20,7 @@ jobs:
     timeout-minutes: 20
 
     env:
+      TARGET_BRANCH: main
       PETROTWIN_DB_HOST: ${{ vars.PETROTWIN_DB_HOST }}
       PETROTWIN_DB_PORT: ${{ vars.PETROTWIN_DB_PORT || '4000' }}
       PETROTWIN_DB_NAME: ${{ vars.PETROTWIN_DB_NAME || 'petrotwin' }}
@@ -27,10 +29,37 @@ jobs:
       PETROTWIN_DB_SSL: "true"
 
     steps:
+      - name: Log and validate trigger context
+        shell: bash
+        env:
+          CHANGED_SOURCES: ${{ toJSON(github.event.client_payload.changed_sources) }}
+          CHANGE_BUNDLE_ID: ${{ github.event.client_payload.change_bundle_id }}
+        run: |
+          set -euo pipefail
+          echo "event_name=${GITHUB_EVENT_NAME}"
+          echo "event_action=${GITHUB_EVENT_ACTION:-manual}"
+          echo "change_bundle_id=${CHANGE_BUNDLE_ID:-manual}"
+          echo "changed_sources=${CHANGED_SOURCES:-[]}"
+          if [ "${GITHUB_EVENT_NAME}" = "repository_dispatch" ]; then
+            python3 - <<'PY'
+          import json, os, sys
+          allowed = {"brent", "fx", "domestic_fuel"}
+          raw = os.environ.get("CHANGED_SOURCES", "[]")
+          sources = json.loads(raw) if raw and raw != "null" else []
+          if not isinstance(sources, list) or not sources:
+              print("::error::repository_dispatch requires non-empty changed_sources", file=sys.stderr)
+              sys.exit(1)
+          unknown = set(sources) - allowed
+          if unknown:
+              print(f"::error::Unknown changed_sources in dispatch payload: {sorted(unknown)}", file=sys.stderr)
+              sys.exit(1)
+          PY
+          fi
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref_name }}
+          ref: ${{ env.TARGET_BRANCH }}
           persist-credentials: true
 
       - name: Set up Python
@@ -68,7 +97,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git add -u -- data/raw
+          git add -u -- 'data/raw/*.csv'
 
           if git diff --cached --quiet; then
             echo "No tracked raw CSV changes to commit."
@@ -78,5 +107,24 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git commit -m "data: update daily market datasets"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git commit -m "data: update market datasets (event-driven)"
+          git push origin "HEAD:${TARGET_BRANCH}"
+
+      - name: Confirm published dispatch state
+        if: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.dispatch_id != '' }}
+        shell: bash
+        env:
+          PYTHONPATH: src
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_DISPATCH_TOKEN: ${{ secrets.GITHUB_DISPATCH_TOKEN }}
+          DISPATCH_ID: ${{ github.event.client_payload.dispatch_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GITHUB_DISPATCH_TOKEN:-}" ]; then
+            echo "GITHUB_DISPATCH_TOKEN not set; state/detector will be reconciled by petrotwin-detect.yml."
+            exit 0
+          fi
+          python -m petrotwin.collectors.change_detector \
+            --state-backend github \
+            --state-branch state/detector \
+            --confirm-dispatch-id "${DISPATCH_ID}"
