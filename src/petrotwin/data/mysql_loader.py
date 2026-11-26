@@ -495,6 +495,70 @@ def _insert_many(
         cursor.executemany(sql, rows[offset:offset + step])
 
 
+IMMUTABLE_SOURCE_FIELDS: tuple[str, ...] = (
+    "snapshot_id",
+    "source_id",
+    "source_url",
+    "publisher_or_attribution",
+    "license_reuse_terms",
+    "raw_filename",
+    "sha256",
+    "row_count",
+    "schema_fingerprint_sha256",
+)
+
+
+def _immutable_source_identity(source: Any) -> dict[str, Any]:
+    """Extract immutable provenance and content identity from a manifest source entry.
+
+    Volatile retrieval metadata (``retrieved_at_utc``) is intentionally excluded so
+    same-day reruns with identical immutable inputs reconcile safely without weakening
+    SHA-256, snapshot, or provenance checks.
+    """
+    if not isinstance(source, dict):
+        raise LoadError("existing run manifest_json is invalid; refusing repair")
+    missing = [f for f in IMMUTABLE_SOURCE_FIELDS if f not in source]
+    if missing:
+        raise LoadError("existing run manifest_json is invalid; refusing repair")
+    return {field: source[field] for field in IMMUTABLE_SOURCE_FIELDS}
+
+
+def _immutable_manifest_identity(manifest: Any) -> dict[str, Any]:
+    """Extract the immutable identity of a run manifest for idempotent reconciliation."""
+    if not isinstance(manifest, dict):
+        raise LoadError("existing run manifest_json is invalid; refusing repair")
+
+    sources = manifest.get("sources")
+    outputs = manifest.get("outputs")
+    if not isinstance(sources, list) or not isinstance(outputs, dict):
+        raise LoadError("existing run manifest_json is invalid; refusing repair")
+
+    normalized_sources: dict[tuple[str, str], dict[str, Any]] = {}
+    for entry in sources:
+        ident = _immutable_source_identity(entry)
+        key = (str(ident["source_id"]), str(ident["raw_filename"]))
+        if key in normalized_sources:
+            raise LoadError("existing run manifest_json is invalid; refusing repair")
+        normalized_sources[key] = ident
+
+    normalized_outputs: dict[str, dict[str, Any]] = {}
+    for filename, meta in outputs.items():
+        if not isinstance(meta, dict) or "rows" not in meta or "sha256" not in meta:
+            raise LoadError("existing run manifest_json is invalid; refusing repair")
+        normalized_outputs[str(filename)] = {
+            "rows": int(meta["rows"]),
+            "sha256": str(meta["sha256"]),
+        }
+
+    return {
+        "schema_version": manifest.get("schema_version"),
+        "pipeline_version": manifest.get("pipeline_version"),
+        "pipeline_sha256": manifest.get("pipeline_sha256"),
+        "sources": [normalized_sources[k] for k in sorted(normalized_sources)],
+        "outputs": normalized_outputs,
+    }
+
+
 def _mysql_connection_config(pymysql: Any) -> dict[str, Any]:
     connect_timeout = max(
         1, int(os.getenv("PETROTWIN_DB_CONNECT_TIMEOUT", str(DEFAULT_CONNECT_TIMEOUT_SECONDS)))
@@ -572,10 +636,13 @@ def publish(bundle: dict[str, Any]) -> str:
 
                 db_manifest = existing.get("manifest_json")
                 if isinstance(db_manifest, str):
-                    db_manifest = json.loads(db_manifest)
+                    try:
+                        db_manifest = json.loads(db_manifest)
+                    except json.JSONDecodeError as exc:
+                        raise LoadError("existing run manifest_json is invalid; refusing repair") from exc
                 if not isinstance(db_manifest, dict):
                     raise LoadError("existing run manifest_json is invalid; refusing repair")
-                if db_manifest.get("outputs") != manifest["outputs"] or db_manifest.get("sources") != manifest["sources"]:
+                if _immutable_manifest_identity(db_manifest) != _immutable_manifest_identity(manifest):
                     raise LoadError("existing run manifest outputs or sources do not match current bundle; refusing repair")
 
                 cur.execute("SELECT report_json FROM quality_report WHERE run_id=%s", (run_id,))
