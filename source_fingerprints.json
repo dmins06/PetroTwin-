@@ -1,23 +1,11 @@
 {
-  "last_published_at_utc": "2026-11-27T14:07:12.860764Z",
-  "last_published_bundle_id": "55c64df61dc0e5462cc34d85b071ee24b090ae852111f9230dd4548b8233b9ac",
+  "last_published_at_utc": "2026-11-28T13:23:52.172039Z",
+  "last_published_bundle_id": "fe6c546be92b565b8d65b89303b8c2870aa9291e0172d4d8625e566d555f844a",
   "last_published_fingerprints": {
     "brent": "4779a29e775c1a7e2f0fc342a9500c6942737c6ace917790edab6eeb4b537077",
     "domestic_fuel": "22b4498247b4328b971d079de06b489ac320525bc56380a7931b5e9cc34cfa54",
-    "fx": "f0dc8b28df76c8177b3489501c57db1f1293a329e698f49c7487508a7c0e8a4c"
+    "fx": "66249179f662ef881db0c96d7b1e4ec7fa6f9358512f91a08d048ac37563b8e6"
   },
-  "pending_dispatch": {
-    "change_bundle_id": "fe6c546be92b565b8d65b89303b8c2870aa9291e0172d4d8625e566d555f844a",
-    "changed_sources": [
-      "fx"
-    ],
-    "dispatch_id": "disp-fe6c546be92b-20261128T132307",
-    "dispatched_at_utc": "2026-11-28T13:23:07.979972Z",
-    "fingerprints": {
-      "brent": "4779a29e775c1a7e2f0fc342a9500c6942737c6ace917790edab6eeb4b537077",
-      "domestic_fuel": "22b4498247b4328b971d079de06b489ac320525bc56380a7931b5e9cc34cfa54",
-      "fx": "66249179f662ef881db0c96d7b1e4ec7fa6f9358512f91a08d048ac37563b8e6"
-    }
-  },
+  "pending_dispatch": null,
   "schema_version": "petrotwin-detector-state-v1"
 }
